@@ -518,6 +518,10 @@ El firmware crea esta estructura:
 │   ├── app.js
 │   └── .version
 │
+├── config/
+│   ├── state.json    (último estado del panel)
+│   └── last.rgb565   (último frame estático)
+│
 └── gallery/
     ├── images/
     │   └── *.rgb565
@@ -559,6 +563,40 @@ El GIF se decodifica y convierte **en el navegador** con un decodificador GIF89a
 ### `/gallery/remote`
 
 Contiene imágenes descargadas desde fuentes remotas, actualmente la integración experimental de Pixilart.
+
+### `/config` — estado persistente
+
+Guarda lo que el panel está mostrando para recuperarlo tras un corte de energía o reinicio (incluido un OTA).
+
+`state.json` contiene:
+
+```text
+kind           frame | anim | clock | idle   (vacío = nunca se guardó nada)
+anim           ruta del .pma cuando kind = anim
+brightness     brillo global
+cMode … cWeatherColor   configuración completa del modo reloj
+```
+
+`last.rgb565` es el último frame estático (8192 bytes), usado cuando `kind = frame`.
+
+Qué cambia el estado:
+
+| Acción | kind guardado |
+|---|---|
+| Enviar imagen / pixel art / texto (`/api/frame`) | `frame` |
+| Mostrar imagen de galería | `frame` |
+| Reproducir animación de galería o GIF | `anim` |
+| Activar modo reloj | `clock` |
+| Desactivar reloj, o borrar la animación/GIF que estaba sonando | `idle` |
+| Mover el brillo | (solo actualiza `brightness`) |
+
+Detalles:
+
+- **Escritura atómica**: se escribe a `.tmp` y se renombra; al leer, si falta el archivo final se usa el `.tmp`. Un desenchufe a mitad de escritura no deja el estado corrupto.
+- **Debounce** de `STATE_SAVE_DELAY_MS` (1.5 s): mover el slider de brillo no escribe la SD en cada paso.
+- **Restauración al arrancar**: `restoreState()` corre justo después de montar la SD y **antes** del Wi-Fi, así el panel muestra su contenido aunque no haya red. Mientras espera la conexión, `connectWiFi()` sigue atendiendo animación y reloj.
+- **Pantalla inicial**: si no hay estado guardado, el estado es `idle` o no se puede restaurar (por ejemplo, se borró el archivo), se muestra `showSplash()`: "RGB" en rojo/verde/azul y "Panel" en blanco.
+- El reloj restaurado muestra una hora incorrecta hasta que NTP sincroniza tras conectar el Wi-Fi.
 
 ---
 

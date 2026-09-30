@@ -1036,12 +1036,166 @@ void stopClock() {
 }
 
 // =========================
+// Persisted display state
+// =========================
+// What the panel shows is saved to the microSD so it survives power loss:
+//   /config/state.json   kind (frame | anim | clock | idle), anim path, brightness, clock config
+//   /config/last.rgb565  last static frame (kind == frame)
+// Writes go to a .tmp file and are renamed, so an unplug mid-write never leaves
+// a corrupt state. Saves are debounced (STATE_SAVE_DELAY_MS) to spare the SD.
+const char* CONFIG_DIR = "/config";
+const char* STATE_PATH = "/config/state.json";
+const char* STATE_TMP = "/config/state.tmp";
+const char* LAST_FRAME_PATH = "/config/last.rgb565";
+const char* LAST_FRAME_TMP = "/config/last.tmp";
+constexpr uint32_t STATE_SAVE_DELAY_MS = 1500;
+String stateKind = "";
+String stateAnim = "";
+bool stateDirty = false;
+uint32_t stateDirtyAt = 0;
+
+void markStateDirty(){ stateDirty = true; stateDirtyAt = millis(); }
+void markState(const char* kind, const String& anim = ""){ stateKind = kind; stateAnim = anim; markStateDirty(); }
+
+String jsonString(const String& json, const char* key){
+  String needle = String("\"") + key + "\":\"";
+  int p = json.indexOf(needle);
+  if (p < 0) return "";
+  p += needle.length();
+  int e = json.indexOf('"', p);
+  return e < 0 ? "" : json.substring(p, e);
+}
+
+bool writeAtomic(const char* path, const char* tmp, const uint8_t* data, size_t len){
+  SD_MMC.remove(tmp);
+  File f = SD_MMC.open(tmp, FILE_WRITE);
+  if (!f) return false;
+  bool ok = f.write(data, len) == len;
+  f.close();
+  if (!ok) { SD_MMC.remove(tmp); return false; }
+  SD_MMC.remove(path);
+  return SD_MMC.rename(tmp, path);
+}
+
+// Falls back to the .tmp file if power was lost between remove() and rename().
+File openWithFallback(const char* path, const char* tmp){
+  if (SD_MMC.exists(path)) return SD_MMC.open(path, FILE_READ);
+  if (SD_MMC.exists(tmp)) return SD_MMC.open(tmp, FILE_READ);
+  return File();
+}
+
+void saveState(){
+  ensureDir(CONFIG_DIR);
+  if (stateKind == "frame") writeAtomic(LAST_FRAME_PATH, LAST_FRAME_TMP, frameBuffer, FRAME_BYTES);
+  String j = "{\"v\":1";
+  j += ",\"kind\":\"" + stateKind + "\"";
+  j += ",\"anim\":\"" + stateAnim + "\"";
+  j += ",\"brightness\":" + String(clockCfg.brightness);
+  j += ",\"cMode\":" + String(clockCfg.mode);
+  j += ",\"cH24\":" + String(clockCfg.hour24 ? 1 : 0);
+  j += ",\"cSeconds\":" + String(clockCfg.showSeconds ? 1 : 0);
+  j += ",\"cDate\":" + String(clockCfg.showDate ? 1 : 0);
+  j += ",\"cTemp\":" + String(clockCfg.showTemp ? 1 : 0);
+  j += ",\"cHumidity\":" + String(clockCfg.showHumidity ? 1 : 0);
+  j += ",\"cWeather\":" + String(clockCfg.showWeather ? 1 : 0);
+  j += ",\"cBg\":" + String(clockCfg.bg);
+  j += ",\"cPrimary\":" + String(clockCfg.primary);
+  j += ",\"cSecondary\":" + String(clockCfg.secondary);
+  j += ",\"cAccent\":" + String(clockCfg.accent);
+  j += ",\"cWeatherColor\":" + String(clockCfg.weatherColor);
+  j += "}";
+  if (writeAtomic(STATE_PATH, STATE_TMP, (const uint8_t*)j.c_str(), j.length())) {
+    Serial.println("Estado guardado: " + (stateKind.length() ? stateKind : String("(vacio)")));
+  } else {
+    Serial.println("ERROR guardando estado en microSD");
+  }
+}
+
+void serviceState(){
+  if (stateDirty && millis() - stateDirtyAt >= STATE_SAVE_DELAY_MS) {
+    stateDirty = false;
+    saveState();
+  }
+}
+
+// Default screen for a fresh device (no saved state) or when restore fails.
+void showSplash(){
+  stopClock(); stopAnim();
+  display.clearDisplay();
+  display.setTextWrap(false);
+  display.setTextSize(2);
+  const char* letters = "RGB";
+  const uint16_t colors[3] = { display.color565(255, 0, 0), display.color565(0, 255, 0), display.color565(0, 90, 255) };
+  for (int i = 0; i < 3; i++) {
+    display.setTextColor(colors[i]);
+    display.setCursor(15 + i * 12, 16);
+    display.print(letters[i]);
+  }
+  display.setTextSize(1);
+  display.setTextColor(display.color565(255, 255, 255));
+  display.setCursor(18, 40);
+  display.print("Panel");
+  display.showBuffer();
+}
+
+void restoreState(){
+  ensureDir(CONFIG_DIR);
+  String j;
+  File sf = openWithFallback(STATE_PATH, STATE_TMP);
+  if (sf) { j = sf.readString(); sf.close(); }
+  if (!j.length()) { Serial.println("Sin estado guardado: pantalla inicial"); showSplash(); return; }
+
+  uint8_t b = (uint8_t)constrain((int)jsonNumber(j, "brightness", 20), 1, 255);
+  clockCfg.brightness = b;
+  display.setBrightness(b);
+
+  String kind = jsonString(j, "kind");
+  if (kind == "frame") {
+    File ff = openWithFallback(LAST_FRAME_PATH, LAST_FRAME_TMP);
+    if (ff && ff.size() == FRAME_BYTES && ff.read(frameBuffer, FRAME_BYTES) == FRAME_BYTES) {
+      ff.close(); applyFrame(); stateKind = kind;
+      Serial.println("Estado restaurado: frame"); return;
+    }
+    if (ff) ff.close();
+  } else if (kind == "anim") {
+    String p = jsonString(j, "anim");
+    if (p.length() && playAnim(p)) {
+      stateKind = kind; stateAnim = p;
+      Serial.println("Estado restaurado: animacion " + p); return;
+    }
+  } else if (kind == "clock") {
+    clockCfg.mode = constrain((int)jsonNumber(j, "cMode", 0), 0, 4);
+    clockCfg.hour24 = jsonNumber(j, "cH24", 1) != 0;
+    clockCfg.showSeconds = jsonNumber(j, "cSeconds", 0) != 0;
+    clockCfg.showDate = jsonNumber(j, "cDate", 1) != 0;
+    clockCfg.showTemp = jsonNumber(j, "cTemp", 1) != 0;
+    clockCfg.showHumidity = jsonNumber(j, "cHumidity", 1) != 0;
+    clockCfg.showWeather = jsonNumber(j, "cWeather", 1) != 0;
+    clockCfg.bg = (uint16_t)jsonNumber(j, "cBg", clockCfg.bg);
+    clockCfg.primary = (uint16_t)jsonNumber(j, "cPrimary", clockCfg.primary);
+    clockCfg.secondary = (uint16_t)jsonNumber(j, "cSecondary", clockCfg.secondary);
+    clockCfg.accent = (uint16_t)jsonNumber(j, "cAccent", clockCfg.accent);
+    clockCfg.weatherColor = (uint16_t)jsonNumber(j, "cWeatherColor", clockCfg.weatherColor);
+    stopAnim();
+    clockCfg.enabled = true;
+    forceWeatherRefresh = true;
+    lastClockDraw = 0;
+    renderClock();
+    stateKind = kind;
+    Serial.println("Estado restaurado: reloj"); return;
+  }
+  Serial.println("Estado '" + kind + "' no restaurable: pantalla inicial");
+  showSplash();
+}
+
+// =========================
 // WiFi / mDNS
 // =========================
 void startMDNS(){if(mdnsReady){MDNS.end();mdnsReady=false;}if(MDNS.begin(MDNS_HOST)){MDNS.addService("http","tcp",80);mdnsReady=true;}}
 void connectWiFi(){
   WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
-  while(WiFi.status()!=WL_CONNECTED){delay(200);}
+  // Keep a restored animation/clock running while waiting for the network.
+  while(WiFi.status()!=WL_CONNECTED){serviceAnim();serviceClock();delay(10);}
   configTime(-21600, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
   startMDNS();
 }
@@ -1155,13 +1309,14 @@ void setupServer(){
     if(!serveFile("/www/app.js"))server.send(404,"text/plain","No JS");
   });
 
-  server.on("/api/frame",HTTP_POST,[]{if(uploadOK&&uploadBytes==FRAME_BYTES){applyFrame();String j="{\"ok\":true,\"renderMs\":"+String(lastRenderMs)+"}";server.send(200,"application/json",j);}else server.send(400,"text/plain","Frame invalido");},frameUpload);
+  server.on("/api/frame",HTTP_POST,[]{if(uploadOK&&uploadBytes==FRAME_BYTES){applyFrame();markState("frame");String j="{\"ok\":true,\"renderMs\":"+String(lastRenderMs)+"}";server.send(200,"application/json",j);}else server.send(400,"text/plain","Frame invalido");},frameUpload);
 
 
   server.on("/api/brightness", HTTP_POST, [](){
     int value = constrain(server.arg("v").toInt(), 1, 255);
     display.setBrightness((uint8_t)value);
     clockCfg.brightness = value;
+    markStateDirty();
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -1185,11 +1340,13 @@ void setupServer(){
     forceWeatherRefresh = true;
     lastClockDraw = 0;
     renderClock();
+    markState("clock");
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
   server.on("/api/clock/stop", HTTP_POST, [](){
     stopClock();
+    markState("idle");
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -1223,15 +1380,15 @@ void setupServer(){
   server.on("/api/gallery/show-image",HTTP_POST,[]{
     String p=String(IMAGE_DIR)+"/"+safeName(server.arg("name"));File f=SD_MMC.open(p,FILE_READ);
     if(!f||f.size()!=FRAME_BYTES){server.send(404,"text/plain","No encontrado");return;}
-    f.read(frameBuffer,FRAME_BYTES);f.close();stopClock();stopAnim();applyFrame();server.send(200,"application/json","{\"ok\":true}");
+    f.read(frameBuffer,FRAME_BYTES);f.close();stopClock();stopAnim();applyFrame();markState("frame");server.send(200,"application/json","{\"ok\":true}");
   });
   server.on("/api/gallery/play-animation",HTTP_POST,[]{
-    String p=String(ANIM_DIR)+"/"+safeName(server.arg("name"));if(!playAnim(p))server.send(400,"text/plain","Animacion invalida");else server.send(200,"application/json","{\"ok\":true}");
+    String p=String(ANIM_DIR)+"/"+safeName(server.arg("name"));if(!playAnim(p))server.send(400,"text/plain","Animacion invalida");else{markState("anim",p);server.send(200,"application/json","{\"ok\":true}");}
   });
   server.on("/api/gallery/delete",HTTP_DELETE,[]{
     String type=server.arg("type"),name=safeName(server.arg("name"));
     String p=(type=="image"?String(IMAGE_DIR):String(ANIM_DIR))+"/"+name;
-    stopAnim(); if(!SD_MMC.remove(p))server.send(500,"text/plain","No se pudo eliminar");else server.send(200,"application/json","{\"ok\":true}");
+    stopAnim(); if(stateKind=="anim"&&stateAnim==p)markState("idle"); if(!SD_MMC.remove(p))server.send(500,"text/plain","No se pudo eliminar");else server.send(200,"application/json","{\"ok\":true}");
   });
 
   server.on("/api/gifs",HTTP_GET,[]{server.send(200,"application/json",gifsJson());});
@@ -1243,10 +1400,11 @@ void setupServer(){
   });
   server.on("/api/gifs/play",HTTP_POST,[]{
     String p=String(GIF_DIR)+"/"+safeName(server.arg("name"))+".pma";
-    if(!playAnim(p))server.send(400,"text/plain","GIF invalido");else server.send(200,"application/json","{\"ok\":true}");
+    if(!playAnim(p))server.send(400,"text/plain","GIF invalido");else{markState("anim",p);server.send(200,"application/json","{\"ok\":true}");}
   });
   server.on("/api/gifs/delete",HTTP_DELETE,[]{
     String base=safeName(server.arg("name"));stopAnim();
+    if(stateKind=="anim"&&stateAnim==String(GIF_DIR)+"/"+base+".pma")markState("idle");
     SD_MMC.remove(String(GIF_DIR)+"/"+base+".gif");
     SD_MMC.remove(String(GIF_DIR)+"/"+base+".pma");
     server.send(200,"application/json","{\"ok\":true}");
@@ -1439,6 +1597,9 @@ void setup(){
   setupSD();
   Serial.println("[2/5] microSD OK");
 
+  Serial.println("Restaurando ultimo estado del panel...");
+  restoreState();
+
   Serial.println("[3/5] Conectando Wi-Fi...");
   connectWiFi();
   Serial.print("[3/5] Wi-Fi OK: ");
@@ -1476,6 +1637,7 @@ void setup(){
 void loop(){
   serviceAnim();
   serviceClock();
+  serviceState();
   if(WiFi.status()==WL_CONNECTED)server.handleClient();
   serviceWiFi();
 }
