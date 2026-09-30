@@ -17,6 +17,8 @@
 #define PxMATRIX_double_buffer true
 #include <PxMatrix.h>
 #include "esp_system.h"
+#include <Fonts/TomThumb.h>
+#include <glcdfont.c>
 
 // =========================
 // Log (Serial tee)
@@ -69,8 +71,8 @@ LogTee Log;
 // =========================
 // WIFI
 // =========================
-const char* WIFI_SSID = "DarkMaster-666";
-const char* WIFI_PASSWORD = "H*nnaHChan1";
+const char* WIFI_SSID = "";
+const char* WIFI_PASSWORD = "";
 const char* MDNS_HOST = "matrix";
 
 // =========================
@@ -94,6 +96,50 @@ constexpr size_t FRAME_BYTES = MATRIX_W * MATRIX_H * 2;
 
 PxMATRIX display(MATRIX_W, MATRIX_H, P_LAT, P_OE, P_A, P_B, P_C, P_D, P_E);
 WebServer server(80);
+
+// >>> FACE TYPES
+// =========================
+// Clock faces: types
+// =========================
+// Declared before any function so the Arduino prototype generator can use them.
+// A face draws into faceFb (64x64 RGB565). Its colors and options arrive as
+// generic slots (FaceSettings.p[] / .o[]); the web UI knows what each slot
+// means for each face (FACES list in app.js).
+struct Paint { uint16_t a; uint16_t b; uint8_t dir; };  // dir: 0 solid, 1 vertical, 2 horizontal, 3 diagonal, 4 rainbow
+constexpr int FACE_PAINTS = 10;
+constexpr int FACE_OPTS = 8;
+struct FaceSettings {
+  char face[24];
+  bool h24;
+  uint8_t lang;   // 0 = es, 1 = en
+  bool blink;     // blinking colon
+  Paint p[FACE_PAINTS];
+  uint8_t o[FACE_OPTS];
+};
+struct WxDay { bool valid; int code; float tmax; float tmin; float hum; };
+struct FaceEnv {
+  struct tm t;
+  bool timeValid;
+  bool night;
+  bool wxValid;
+  float temp;
+  float hum;
+  int code;
+  WxDay d[4];     // 0 = today
+  bool wifi;
+  int rssi;
+  const uint16_t* slot[3];  // 18x18 RGB565 pictures for the "tablero" face, may be null
+};
+struct Sprite { uint8_t w; uint8_t h; const char* keys; const uint16_t* pal; const char* px; };
+// <<< FACE TYPES
+// Declared by hand: the Arduino prototype generator stops at the embedded web
+// assets (raw strings), so functions used before their definition need this.
+void faceDefaults(FaceSettings& s);
+bool loadClockCfg(FaceSettings& s);
+void saveClockCfg();
+void loadFaceSlots();
+void saveLocation();
+String jsonEsc(const String& in);
 
 // Refresco del HUB75 en una tarea FreeRTOS dedicada.
 // No usamos una ISR porque PxMatrix usa SPI internamente y ese camino
@@ -197,9 +243,29 @@ int weatherCode = -1;
 volatile bool weatherValid = false;
 volatile bool forceWeatherRefresh = true;
 TaskHandle_t weatherTaskHandle = nullptr;
-uint32_t lastClockDraw = 0;
-const float PUEBLA_LAT = 19.0414f;
-const float PUEBLA_LON = -98.2063f;
+// Weather forecast and location. Written by the weather task (core 0) and read
+// by the clock (core 1): always copy them under wxMux.
+struct LocationCfg { char name[48]; float lat; float lon; int32_t utcOffset; };
+LocationCfg location = {"Puebla", 19.0414f, -98.2063f, -21600};
+const char* LOCATION_PATH = "/config/location.json";
+const char* LOCATION_TMP = "/config/location.tmp";
+WxDay wxDays[4];
+volatile bool weatherIsDay = true;
+int wxSunriseMin = -1;             // today, minutes after local midnight
+int wxSunsetMin = -1;
+volatile bool utcOffsetPending = false;
+int32_t pendingUtcOffset = -21600;
+portMUX_TYPE wxMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Clock faces: the active face and its settings (saved in /config/clock.json).
+FaceSettings faceCfg;
+uint16_t faceSlots[3][18 * 18];    // user pictures of the "tablero" face
+bool faceSlotOk[3] = {false, false, false};
+time_t lastClockSecond = 0;
+uint32_t previewHoldUntil = 0;     // while set, the panel shows an editor preview
+const char* CLOCK_PATH = "/config/clock.json";
+const char* CLOCK_TMP = "/config/clock.tmp";
+const char* const LEGACY_FACES[5] = {"clasico-digital", "clasico-fecha", "clasico-clima", "clasico-analogico", "clasico-hibrido"};
 
 // =========================
 // Embedded bootstrap web
@@ -211,7 +277,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>Matrix Studio 64</title>
-  <link rel="stylesheet" href="/tailwind.css?v=56">
+  <link rel="stylesheet" href="/tailwind.css?v=57">
 </head>
 <body>
   <div id="app"></div>
@@ -223,7 +289,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     </div>
   </div>
   <div id="toastHost" class="toast-host"></div>
-  <script src="/app.js?v=56"></script>
+  <script src="/app.js?v=57"></script>
 </body>
 </html>)HTML";
 
@@ -336,6 +402,79 @@ body.no-scroll{overflow:hidden}
   .monitor{height:300px;font-size:11px;padding:10px}.monitor .ts{margin-right:7px}
 }
 @media(max-width:360px){.sheet-grid{grid-template-columns:repeat(3,1fr)}}
+.clock-grid{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;align-items:start}.clock-main{min-width:0;order:1}.clock-side{order:2;position:sticky;top:16px}
+.clock-preview-card{display:grid;gap:12px}.clock-preview-card .card-title{margin:0}
+.clock-preview-wrap{display:flex;justify-content:center;align-items:center;padding:12px;background:repeating-conic-gradient(#08101d 0 25%,#0b1423 0 50%) 50%/18px 18px;border:1px solid #253754;border-radius:14px}
+.clock-preview-wrap canvas{width:256px;max-width:100%}
+.live-row{border-bottom:0;padding:2px 0 0}
+.seg-control{display:flex;background:#08111f;border:1px solid var(--border);border-radius:12px;padding:3px;gap:3px}
+.seg{flex:1;border:0;background:transparent;color:#9aa9bf;font:inherit;font-size:13px;font-weight:750;padding:8px 6px;border-radius:9px;transition:background .15s,color .15s}.seg.active{background:#1c2b45;color:#fff}
+.face-group{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#5d6f8c;font-weight:800;margin:14px 2px 8px}.face-group:first-child{margin-top:0}
+.face-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}
+.face-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px;border-radius:14px;border:1px solid var(--border);background:#0a1322;color:#c9d4e5;font:inherit;font-size:12px;font-weight:750;text-align:center;transition:border-color .15s,background .15s,color .15s,transform .12s}
+.face-card canvas{width:100%;max-width:120px;border-radius:8px;border:1px solid #1d2b44;box-shadow:none}
+.face-card.active{border-color:var(--accent);background:rgba(255,107,53,.1);color:#fff;box-shadow:0 0 0 2px rgba(255,107,53,.35)}
+.face-live{position:absolute;top:6px;left:6px;font-style:normal;font-size:9.5px;font-weight:850;letter-spacing:.04em;background:var(--green);color:#052e16;border-radius:999px;padding:2px 7px}
+.param-sec{border-top:1px solid #1d2d47;padding:6px 0}.param-sec:first-child{border-top:0}
+.param-sec>summary{list-style:none;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#7b8dab;font-weight:850;padding:8px 0}.param-sec>summary::-webkit-details-marker{display:none}.param-sec>summary::after{content:'▾';float:right;color:#5d6f8c}.param-sec:not([open])>summary::after{content:'▸'}
+.param-block{border:1px solid #1d2d47;border-radius:14px;padding:4px 12px;margin:8px 0;background:#08111f}
+.param-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;min-height:44px}
+.param-label{font-weight:750;font-size:14px}.param-sub{font-size:13px;color:var(--muted)}
+.color-pick{display:grid;grid-template-columns:44px 92px;gap:8px;align-items:center}
+.color-pick input[type=color]{width:44px;height:36px;padding:2px;border:1px solid #344c70;border-radius:10px;background:#0a1322}
+.color-pick .hex{padding:8px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+.select-sm{width:auto;min-width:140px;padding:8px 10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 10px}
+.chip{border:1px solid rgba(255,255,255,.18);background:linear-gradient(90deg,var(--c1),var(--c2));color:#07101d;font:inherit;font-size:12px;font-weight:850;padding:7px 11px;border-radius:999px;transition:filter .15s,transform .12s}
+.slot-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.slot{display:flex;flex-direction:column;gap:8px;align-items:center;border:1px solid #1d2d47;border-radius:14px;padding:10px;background:#08111f}
+.slot-canvas{width:72px;height:72px;aspect-ratio:1;border-radius:8px;box-shadow:none}.slot-canvas.empty{background:repeating-conic-gradient(#0d1a2c 0 25%,#12223a 0 50%) 50%/12px 12px}
+.slot-actions{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+.btn-sm{padding:7px 10px;font-size:12px;border-radius:9px}
+.city-results{display:grid;gap:6px}.city-results:empty{display:none}
+.city-item{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;border:1px solid var(--border);background:#0a1322;color:#e5e7eb;font:inherit;padding:10px 12px;border-radius:12px;transition:border-color .15s,background .15s}
+.city-item span{font-size:12px;color:var(--muted)}
+.city-pin{font-size:12px}
+.wx-now{font-size:15px}.wx-days{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.wx-day{display:flex;flex-direction:column;gap:3px;border:1px solid #1d2d47;border-radius:12px;padding:8px 6px;text-align:center;background:#08111f;font-size:13px}.wx-day b{font-size:12px;color:#c9d4e5}.wx-day small{font-size:10.5px;color:var(--muted)}
+.t-max{color:#fdba74;font-weight:800}.t-min{color:#60a5fa;font-weight:800}
+.pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px;max-height:60vh;overflow:auto}
+.pick{display:flex;flex-direction:column;gap:4px;align-items:center;border:1px solid var(--border);background:#0a1322;color:#c9d4e5;font:inherit;font-size:11px;padding:6px;border-radius:10px;transition:border-color .15s,background .15s}.pick canvas{width:100%;box-shadow:none;border-radius:6px}
+button,a,summary,label.switch,.file-picker,.file-button,.nav-btn,.tab,.tile,.library-card,.face-card,.chip,.seg,.city-item,.pick,.gif-tab,.giphy-grid img,select,input[type=color],input[type=range],input[type=checkbox],label.btn{cursor:pointer}
+button:disabled,.btn:disabled{cursor:not-allowed;opacity:.5}
+@media(hover:hover){
+.btn:hover:not(:disabled){background:#22344f;border-color:#4b6a93;color:#fff}
+.btn-primary:hover:not(:disabled){background:linear-gradient(135deg,#ff8a5b,#ffb08a);border-color:transparent;color:#1a0d05}
+.btn-green:hover:not(:disabled){background:#166534;border-color:#22c55e;color:#dcfce7}
+.btn-danger:hover:not(:disabled){background:#5a1f2a;border-color:#9f3040;color:#ffd5da}
+.file-picker:hover{border-color:#5b7aa6;background:#0b1628}.file-picker:hover .file-button{background:#27405f;color:#fff}
+a:hover{color:#ffb08a}
+.tab:hover{color:#fff}.tab:hover .ic{background:rgba(255,255,255,.07)}.tab.active:hover .ic{background:rgba(255,107,53,.26)}
+.tile:hover{border-color:#4b6a93;background:#122038;color:#fff}.tile:hover svg{color:#fff}
+.face-card:hover{border-color:#4b6a93;background:#122038;color:#fff}.face-card.active:hover{border-color:var(--accent2)}
+.chip:hover{filter:brightness(1.18);transform:translateY(-1px)}
+.seg:hover:not(.active){background:#13213a;color:#fff}
+.city-item:hover,.pick:hover:not(:disabled){border-color:#4b6a93;background:#122038;color:#fff}
+.param-sec>summary:hover{color:#fff}
+.sheet-close:hover{background:#22344f;color:#fff}
+.giphy-grid img:hover{border-color:#4b6a93}
+}
+.btn:active:not(:disabled),.face-card:active,.chip:active,.seg:active,.city-item:active,.tile:active,.pick:active:not(:disabled){transform:scale(.97)}
+:focus-visible{outline:2px solid #22d3ee;outline-offset:2px}
+@media(max-width:980px){
+.clock-grid{grid-template-columns:1fr;gap:12px}
+.clock-side{order:0;position:sticky;top:calc(58px + env(safe-area-inset-top));z-index:30}
+.clock-preview-card{grid-template-columns:104px minmax(0,1fr);gap:8px 12px;align-items:center;padding:10px 12px;background:rgba(12,20,36,.97);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.clock-preview-card .card-title{grid-column:2;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.clock-preview-wrap{grid-row:1 / span 3;padding:4px;border-radius:10px}.clock-preview-wrap canvas{width:94px}
+.clock-preview-card .seg-control,.clock-preview-card .toolbar{grid-column:2}
+.clock-preview-card .seg{padding:6px 4px;font-size:12px}
+.clock-preview-card .toolbar{gap:6px}.clock-preview-card .toolbar .btn{padding:8px 9px;font-size:12px}
+.clock-preview-card .live-row{grid-column:1 / -1;padding:2px 0 0}.clock-preview-card .live-row .text-xs{display:none}
+.face-grid{grid-template-columns:repeat(3,1fr);gap:8px}.face-card{padding:8px 6px;font-size:11px}
+.color-pick{grid-template-columns:44px 84px}
+.wx-days{gap:6px}
+}
 )CSS";
 
 const char APP_JS[] PROGMEM = R"JS(const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
@@ -390,42 +529,37 @@ host.innerHTML=`
    </section>
 
    <section class="page" id="page-clock">
-    <div class="page-head"><div><h2>Modo reloj</h2><p>Reloj autónomo sincronizado por Internet con clima y humedad para Puebla.</p></div><span class="pill"><span class="dot"></span><span id="clockState">Inactivo</span></span></div>
-    <div class="card">
-     <div class="card-title">Diseño</div>
-     <div class="clock-layouts" id="clockLayouts">
-      <div class="clock-layout active" data-mode="0"><div class="mini">12:34</div><div class="label">Digital</div></div>
-      <div class="clock-layout" data-mode="1"><div class="mini">12:34<br>21 SEP</div><div class="label">Digital + fecha</div></div>
-      <div class="clock-layout" data-mode="2"><div class="mini">12:34<br>21°C<br>55%</div><div class="label">Clima</div></div>
-      <div class="clock-layout" data-mode="3"><div class="mini">◯<br>10:10</div><div class="label">Analógico</div></div>
-      <div class="clock-layout" data-mode="4"><div class="mini">◯ 12:34<br>21°C</div><div class="label">Híbrido</div></div>
-     </div>
-    </div>
-    <div class="grid-2 mt-3">
-     <div class="card">
-      <div class="card-title">Contenido</div>
-      <div class="switch-row"><span>Formato 24 horas</span><label class="switch"><input id="clock24" type="checkbox" checked><span class="switch-track"></span></label></div>
-      <div class="switch-row"><span>Mostrar segundos</span><label class="switch"><input id="clockSeconds" type="checkbox"><span class="switch-track"></span></label></div>
-      <div class="switch-row"><span>Mostrar fecha</span><label class="switch"><input id="clockDate" type="checkbox" checked><span class="switch-track"></span></label></div>
-      <div class="switch-row"><span>Temperatura</span><label class="switch"><input id="clockTemp" type="checkbox" checked><span class="switch-track"></span></label></div>
-      <div class="switch-row"><span>Humedad</span><label class="switch"><input id="clockHumidity" type="checkbox" checked><span class="switch-track"></span></label></div>
-      <div class="switch-row"><span>Estado del clima</span><label class="switch"><input id="clockWeather" type="checkbox" checked><span class="switch-track"></span></label></div>
-      <label class="field mt-3">Brillo del reloj<div class="quick-range mt-2"><input id="clockBrightness" type="range" min="1" max="255" value="20"><span id="clockBrightnessValue">20</span></div></label>
-     </div>
-     <div class="card">
-      <div class="card-title">Colores</div>
-      <div class="color-grid">
-       <div><label class="field">Fondo</label><div class="clock-color mt-2"><input id="clockBg" type="color" value="#000000"><input class="input" id="clockBgHex" value="#000000"></div></div>
-       <div><label class="field">Hora / agujas</label><div class="clock-color mt-2"><input id="clockPrimary" type="color" value="#ffffff"><input class="input" id="clockPrimaryHex" value="#ffffff"></div></div>
-       <div><label class="field">Fecha / segundos</label><div class="clock-color mt-2"><input id="clockSecondary" type="color" value="#22d3ee"><input class="input" id="clockSecondaryHex" value="#22d3ee"></div></div>
-       <div><label class="field">Acento</label><div class="clock-color mt-2"><input id="clockAccent" type="color" value="#ff6b35"><input class="input" id="clockAccentHex" value="#ff6b35"></div></div>
-       <div><label class="field">Clima</label><div class="clock-color mt-2"><input id="clockWeatherColor" type="color" value="#7dd3fc"><input class="input" id="clockWeatherHex" value="#7dd3fc"></div></div>
+    <div class="page-head"><div><h2>Modo reloj</h2><p>Elige una carátula, personalízala y mándala al panel.</p></div><span class="pill"><span class="dot off" id="clockDot"></span><span id="clockState">Inactivo</span></span></div>
+    <div class="clock-grid">
+     <div class="clock-side">
+      <div class="card clock-preview-card">
+       <div class="card-title" id="clockFaceTitle">Vista previa</div>
+       <div class="clock-preview-wrap"><canvas id="clockCanvas" width="64" height="64"></canvas></div>
+       <div class="seg-control" id="clockSim" role="group" aria-label="Simular"><button class="seg active" data-sim="auto">Ahora</button><button class="seg" data-sim="day">Día</button><button class="seg" data-sim="night">Noche</button></div>
+       <div class="toolbar"><button class="btn btn-primary" id="activateClock">Aplicar al panel</button><button class="btn" id="resetFace">Restablecer</button><button class="btn btn-danger" id="stopClock">Desactivar</button></div>
+       <div class="switch-row live-row"><div><div class="font-semibold text-sm">Ver en el panel mientras edito</div><div class="text-xs muted">En el LED los colores no se ven igual que en pantalla.</div></div><label class="switch"><input id="clockLive" type="checkbox"><span class="switch-track"></span></label></div>
       </div>
      </div>
-    </div>
-    <div class="grid-2 mt-3">
-     <div class="card"><div class="card-title">Vista previa</div><div class="canvas-wrap"><canvas id="clockCanvas" width="64" height="64"></canvas></div></div>
-     <div class="card"><div class="card-title">Puebla · datos de Internet</div><div class="clock-info"><div class="box"><div class="big" id="weatherTemp">--°C</div><div class="small">Temperatura</div></div><div class="box"><div class="big" id="weatherHumidity">--%</div><div class="small">Humedad</div></div><div class="box"><div class="big" id="weatherState">--</div><div class="small">Clima</div></div></div><div class="note mt-4">La hora del panel se sincroniza por NTP. El clima se actualiza desde Open-Meteo aproximadamente cada 15 minutos. Si Internet cae, el reloj sigue usando la última hora sincronizada y conserva el último clima recibido.</div><div class="toolbar mt-4"><button class="btn" id="refreshWeather">Actualizar clima</button><button class="btn btn-primary" id="activateClock">Activar modo reloj</button><button class="btn btn-danger" id="stopClock">Desactivar reloj</button></div></div>
+     <div class="clock-main">
+      <div class="card"><div class="card-title">Carátulas</div><div id="faceGallery"></div></div>
+      <div class="card mt-3"><div class="card-title" id="faceEditorTitle">Personalizar</div><p class="muted text-sm" id="faceEditorDesc"></p><div id="faceEditor"></div></div>
+      <div class="card mt-3">
+       <div class="card-title">Formato</div>
+       <div class="switch-row"><span>Formato 24 horas</span><label class="switch"><input id="clock24" type="checkbox" checked><span class="switch-track"></span></label></div>
+       <div class="switch-row"><span>Parpadeo de los dos puntos</span><label class="switch"><input id="clockBlink" type="checkbox"><span class="switch-track"></span></label></div>
+       <label class="field mt-3">Idioma de las fechas<select class="select mt-2" id="clockLang"><option value="0">Español (LUN, ENE)</option><option value="1">English (MON, JAN)</option></select></label>
+       <label class="field mt-3">Brillo<div class="quick-range mt-2"><input id="clockBrightness" type="range" min="1" max="255" value="20"><span id="clockBrightnessValue">20</span></div></label>
+      </div>
+      <div class="card mt-3">
+       <div class="card-title">Ubicación y clima</div>
+       <div class="row-wrap"><span class="pill"><span class="city-pin">📍</span><span id="cityName">Puebla</span></span><button class="btn" id="refreshWeather">Actualizar clima</button></div>
+       <div class="row-wrap mt-3"><input class="input" style="flex:1;min-width:0" id="citySearch" placeholder="Buscar ciudad…" autocomplete="off"><button class="btn btn-primary" id="citySearchBtn">Buscar</button></div>
+       <div class="city-results mt-2" id="cityResults"></div>
+       <div class="wx-now mt-3" id="wxNow"></div>
+       <div class="wx-days mt-2" id="wxDays"></div>
+       <div class="note mt-3">La hora se sincroniza por Internet y la zona horaria se ajusta sola según la ciudad. El clima viene de Open-Meteo y se actualiza cada 15 minutos.</div>
+      </div>
+     </div>
     </div>
    </section>
 
@@ -523,7 +657,7 @@ $('#tabbar').innerHTML=TABS.map(id=>{const n=NAV.find(x=>x.id===id);return `<but
 $('#sheetBody').innerHTML=GROUPS.map(g=>`<div class="sheet-group">${g}</div><div class="sheet-grid">`+NAV.filter(n=>n.group===g).map(n=>`<button class="tile" data-page="${n.id}">${icon(n.id)}<span>${n.label}</span>${navDot(n.id)}</button>`).join('')+'</div>').join('');
 
 let currentPage=null,sheetOpen=false,sheetOpenedAt=0;
-const PAGE_HOOKS={gallery:()=>loadGallery(),gifs:()=>loadGifs(),admin:()=>listFiles(),clock:()=>{loadClockStatus();renderClockPreview()},status:()=>statusStart()};
+const PAGE_HOOKS={gallery:()=>loadGallery(),gifs:()=>loadGifs(),admin:()=>listFiles(),clock:()=>clockEnter(),status:()=>statusStart()};
 function go(page){
   if(!$('#page-'+page))page='image';
   const changed=page!==currentPage;currentPage=page;
@@ -531,6 +665,7 @@ function go(page){
   $$('.nav-btn,.tab,.tile').forEach(x=>{const on=x.dataset.page===page;x.classList.toggle('active',on);if(on)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});
   $('#tabMore').classList.toggle('active',!TABS.includes(page));
   if(page!=='status')statusStop();
+  if(page!=='clock')clockLeave();
   if(changed)window.scrollTo(0,0);
   try{localStorage.setItem('ms.page',page)}catch(e){}
   const h=PAGE_HOOKS[page];if(h)h();
@@ -610,16 +745,101 @@ $('#txtCrisp').onchange=renderRichText;
 editor.addEventListener('input',renderRichText);$('#renderText').onclick=renderRichText;$('#sendText').onclick=()=>{renderRichText();sendCanvas(tc).catch(e=>toast(e.message,'err'))};renderRichText();
 
 // CLOCK UI
-let clockMode=0;$$('.clock-layout').forEach(el=>el.onclick=()=>{$$('.clock-layout').forEach(x=>x.classList.remove('active'));el.classList.add('active');clockMode=+el.dataset.mode;renderClockPreview()});
-const colorPairs=[['clockBg','clockBgHex'],['clockPrimary','clockPrimaryHex'],['clockSecondary','clockSecondaryHex'],['clockAccent','clockAccentHex'],['clockWeatherColor','clockWeatherHex']];colorPairs.forEach(([c,h])=>{$('#'+c).oninput=e=>{$('#'+h).value=e.target.value;renderClockPreview()};$('#'+h).onchange=e=>{if(/^#[0-9a-f]{6}$/i.test(e.target.value)){$('#'+c).value=e.target.value;renderClockPreview()}}});
-['clock24','clockSeconds','clockDate','clockTemp','clockHumidity','clockWeather'].forEach(id=>$('#'+id).onchange=renderClockPreview);
-function clockCfg(){return{mode:clockMode,h24:$('#clock24').checked?1:0,seconds:$('#clockSeconds').checked?1:0,date:$('#clockDate').checked?1:0,temp:$('#clockTemp').checked?1:0,humidity:$('#clockHumidity').checked?1:0,weather:$('#clockWeather').checked?1:0,brightness:+$('#clockBrightness').value,bg:$('#clockBg').value,primary:$('#clockPrimary').value,secondary:$('#clockSecondary').value,accent:$('#clockAccent').value,weatherColor:$('#clockWeatherColor').value}}
-function renderClockPreview(){const c=$('#clockCanvas'),x=c.getContext('2d'),cfg=clockCfg(),now=new Date();x.fillStyle=cfg.bg;x.fillRect(0,0,64,64);let hh=now.getHours(),ampm='';if(!cfg.h24){ampm=hh>=12?'P':'A';hh=hh%12||12}const mm=String(now.getMinutes()).padStart(2,'0'),ss=String(now.getSeconds()).padStart(2,'0'),hs=String(hh).padStart(2,'0');x.imageSmoothingEnabled=false;x.textAlign='center';if(cfg.mode===3||cfg.mode===4){x.strokeStyle=cfg.primary;x.lineWidth=1;x.beginPath();x.arc(cfg.mode===4?21:32,cfg.mode===4?25:30,cfg.mode===4?18:26,0,Math.PI*2);x.stroke();const cx=cfg.mode===4?21:32,cy=cfg.mode===4?25:30,r=cfg.mode===4?18:26;const ma=(now.getMinutes()/60)*Math.PI*2-Math.PI/2,ha=((now.getHours()%12+now.getMinutes()/60)/12)*Math.PI*2-Math.PI/2;x.strokeStyle=cfg.accent;x.beginPath();x.moveTo(cx,cy);x.lineTo(cx+Math.cos(ma)*r*.75,cy+Math.sin(ma)*r*.75);x.stroke();x.strokeStyle=cfg.primary;x.beginPath();x.moveTo(cx,cy);x.lineTo(cx+Math.cos(ha)*r*.5,cy+Math.sin(ha)*r*.5);x.stroke();if(cfg.mode===4){x.fillStyle=cfg.primary;x.font='bold 9px monospace';x.fillText(`${hs}:${mm}`,48,18);x.fillStyle=cfg.weatherColor;x.font='8px monospace';if(cfg.temp)x.fillText($('#weatherTemp').textContent,47,32);if(cfg.humidity)x.fillText($('#weatherHumidity').textContent,47,43)}}else{x.fillStyle=cfg.primary;x.font='bold 16px monospace';x.fillText(`${hs}:${mm}`,32,cfg.mode===0?30:22);if(!cfg.h24){x.font='6px monospace';x.fillText(ampm,58,cfg.mode===0?30:22)}if(cfg.seconds){x.fillStyle=cfg.secondary;x.font='8px monospace';x.fillText(ss,32,cfg.mode===0?42:34)}if((cfg.mode===1||cfg.date)&&cfg.date){x.fillStyle=cfg.secondary;x.font='7px monospace';x.fillText(now.toLocaleDateString('es-MX',{day:'2-digit',month:'short'}).toUpperCase().replace('.',''),32,46)}if(cfg.mode===2){x.fillStyle=cfg.weatherColor;x.font='8px monospace';if(cfg.temp)x.fillText($('#weatherTemp').textContent,18,38);if(cfg.humidity)x.fillText($('#weatherHumidity').textContent,47,38);if(cfg.weather){x.fillStyle=cfg.accent;x.font='7px monospace';x.fillText($('#weatherState').textContent,32,53)}}}}
-setInterval(()=>{if($('#page-clock').classList.contains('active'))renderClockPreview()},1000);
-async function loadClockStatus(){try{const s=await (await fetch('/api/clock/status')).json();$('#clockState').textContent=s.enabled?'Activo':'Inactivo';$('#weatherTemp').textContent=s.weatherValid?`${Math.round(s.temp)}°C`:'--°C';$('#weatherHumidity').textContent=s.weatherValid?`${Math.round(s.humidity)}%`:'--%';$('#weatherState').textContent=s.weatherText||'--';if(s.brightness){setBrightness(s.brightness)}renderClockPreview()}catch(e){toast('No pude leer estado del reloj','err')}}
-$('#refreshWeather').onclick=async()=>{showLoader('Actualizando clima','Consultando Open-Meteo…',35);const r=await fetch('/api/clock/weather',{method:'POST'});hideLoader();if(r.ok){toast('Actualización de clima solicitada');setTimeout(loadClockStatus,1500)}else toast(await r.text(),'err')};
-$('#activateClock').onclick=async()=>{const cfg=clockCfg(),body=new URLSearchParams(Object.entries(cfg));showLoader('Activando reloj','Guardando configuración…',55);const r=await fetch('/api/clock/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});hideLoader();if(!r.ok)return toast(await r.text(),'err');$('#clockState').textContent='Activo';toast('Modo reloj activado');setBrightness(cfg.brightness)};
-$('#stopClock').onclick=async()=>{await fetch('/api/clock/stop',{method:'POST'});$('#clockState').textContent='Inactivo';toast('Modo reloj desactivado')};
+// ---- Modo reloj (caratulas) ----
+// The ESP32 draws every face; the editor asks it for a preview of the current
+// (unsaved) settings via /api/clock/preview and paints the returned pixels.
+// Each face uses generic slots: a/b/d = paint colors + gradient direction,
+// o = options. FACES says what every slot means.
+const FACES=[{"id":"clasico-digital","name":"Digital","cat":"Clásicos","desc":"La hora grande, con segundos y fecha opcionales.","params":[{"t":"color","s":0,"l":"Fondo","a":"#000000"},{"t":"color","s":1,"l":"Hora / agujas","a":"#ffffff"},{"t":"color","s":2,"l":"Fecha / segundos","a":"#22d3ee"},{"t":"bool","o":0,"l":"Mostrar segundos","v":0},{"t":"bool","o":1,"l":"Mostrar fecha","v":1}],"def":{"a":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"b":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,1,1,1,1,0,0,0]}},{"id":"clasico-fecha","name":"Digital + fecha","cat":"Clásicos","desc":"Hora arriba y fecha debajo.","params":[{"t":"color","s":0,"l":"Fondo","a":"#000000"},{"t":"color","s":1,"l":"Hora / agujas","a":"#ffffff"},{"t":"color","s":2,"l":"Fecha / segundos","a":"#22d3ee"},{"t":"bool","o":0,"l":"Mostrar segundos","v":0},{"t":"bool","o":1,"l":"Mostrar fecha","v":1}],"def":{"a":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"b":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,1,1,1,1,0,0,0]}},{"id":"clasico-clima","name":"Clima","cat":"Clásicos","desc":"Hora, fecha y el clima actual abajo.","params":[{"t":"color","s":0,"l":"Fondo","a":"#000000"},{"t":"color","s":1,"l":"Hora / agujas","a":"#ffffff"},{"t":"color","s":2,"l":"Fecha / segundos","a":"#22d3ee"},{"t":"color","s":3,"l":"Acento","a":"#ff6b35"},{"t":"color","s":4,"l":"Clima","a":"#7dd3fc"},{"t":"bool","o":0,"l":"Mostrar segundos","v":0},{"t":"bool","o":1,"l":"Mostrar fecha","v":1},{"t":"bool","o":2,"l":"Temperatura","v":1},{"t":"bool","o":3,"l":"Humedad","v":1},{"t":"bool","o":4,"l":"Estado del clima","v":1}],"def":{"a":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"b":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,1,1,1,1,0,0,0]}},{"id":"clasico-analogico","name":"Analógico","cat":"Clásicos","desc":"Reloj de manecillas con fecha.","params":[{"t":"color","s":0,"l":"Fondo","a":"#000000"},{"t":"color","s":1,"l":"Hora / agujas","a":"#ffffff"},{"t":"color","s":2,"l":"Fecha / segundos","a":"#22d3ee"},{"t":"color","s":3,"l":"Acento","a":"#ff6b35"},{"t":"bool","o":0,"l":"Mostrar segundos","v":0},{"t":"bool","o":1,"l":"Mostrar fecha","v":1}],"def":{"a":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"b":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,1,1,1,1,0,0,0]}},{"id":"clasico-hibrido","name":"Híbrido","cat":"Clásicos","desc":"Manecillas a la izquierda, hora y clima a la derecha.","params":[{"t":"color","s":0,"l":"Fondo","a":"#000000"},{"t":"color","s":1,"l":"Hora / agujas","a":"#ffffff"},{"t":"color","s":2,"l":"Fecha / segundos","a":"#22d3ee"},{"t":"color","s":3,"l":"Acento","a":"#ff6b35"},{"t":"color","s":4,"l":"Clima","a":"#7dd3fc"},{"t":"bool","o":0,"l":"Mostrar segundos","v":0},{"t":"bool","o":1,"l":"Mostrar fecha","v":1},{"t":"bool","o":2,"l":"Temperatura","v":1},{"t":"bool","o":3,"l":"Humedad","v":1},{"t":"bool","o":4,"l":"Estado del clima","v":1}],"def":{"a":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"b":["#000000","#ffffff","#22d3ee","#ff6b35","#7dd3fc","#000000","#000000","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,1,1,1,1,0,0,0]}},{"id":"minimal-apilado","name":"Minimal apilado","cat":"Simples","desc":"Horas sobre minutos en dígitos grandes, con fecha opcional.","params":[{"t":"paint","s":0,"l":"Dígitos","a":"#b388ff","b":"#22d3ee","d":1,"rb":false},{"t":"color","s":1,"l":"Fecha","a":"#7dd3fc"},{"t":"color","s":2,"l":"Fondo","a":"#000000"},{"t":"bool","o":0,"l":"Mostrar fecha","v":1},{"t":"select","o":1,"l":"Estilo de dígitos","opts":[[0,"7 segmentos"],[1,"Bloque"],[2,"Fino"]],"v":0}],"def":{"a":["#b388ff","#7dd3fc","#000000","#000000","#000000","#000000","#000000","#000000","#000000","#000000"],"b":["#22d3ee","#7dd3fc","#000000","#000000","#000000","#000000","#000000","#000000","#000000","#000000"],"d":[1,0,0,0,0,0,0,0,0,0],"o":[1,0,0,0,0,0,0,0]}},{"id":"marco-arcoiris","name":"Marco arcoíris","cat":"Simples","desc":"Dígitos apilados dentro de un marco en degradado.","params":[{"t":"paint","s":0,"l":"Dígitos","a":"#ffffff","b":"#ffffff","d":0,"rb":false},{"t":"paint","s":1,"l":"Marco","a":"#ff4d6d","b":"#4dabf7","d":4,"rb":true},{"t":"color","s":2,"l":"Fondo","a":"#000000"},{"t":"range","o":0,"l":"Grosor del marco","min":1,"max":3,"v":2},{"t":"select","o":1,"l":"Estilo de dígitos","opts":[[0,"7 segmentos"],[1,"Bloque"],[2,"Fino"]],"v":1}],"def":{"a":["#ffffff","#ff4d6d","#000000","#000000","#000000","#000000","#000000","#000000","#000000","#000000"],"b":["#ffffff","#4dabf7","#000000","#000000","#000000","#000000","#000000","#000000","#000000","#000000"],"d":[0,4,0,0,0,0,0,0,0,0],"o":[2,1,0,0,0,0,0,0]}},{"id":"segmentos-xl","name":"Segmentos XL","cat":"Simples","desc":"Hora gigante estilo LED con segmentos apagados visibles.","params":[{"t":"paint","s":0,"l":"Segmentos encendidos","a":"#4ade80","b":"#22d3ee","d":0,"rb":false},{"t":"color","s":1,"l":"Segmentos apagados","a":"#16225c"},{"t":"paint","s":2,"l":"Textos","a":"#4ade80","b":"#4ade80","d":0,"rb":false},{"t":"color","s":3,"l":"Fondo","a":"#000000"},{"t":"paint","s":4,"l":"Temperatura","a":"#4ade80","b":"#4ade80","d":0,"rb":false},{"t":"bool","o":0,"l":"Ícono Wi-Fi","v":1},{"t":"bool","o":1,"l":"Segmentos fantasma","v":1}],"def":{"a":["#4ade80","#16225c","#4ade80","#000000","#4ade80","#000000","#000000","#000000","#000000","#000000"],"b":["#22d3ee","#16225c","#4ade80","#000000","#4ade80","#000000","#000000","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[1,1,0,0,0,0,0,0]}},{"id":"clima-4dias","name":"Clima 4 días","cat":"Clima","desc":"Fecha, hora, clima actual y pronóstico de 4 días.","params":[{"t":"color","s":0,"l":"Fecha","a":"#9ca3af"},{"t":"color","s":1,"l":"Hora","a":"#ffffff"},{"t":"color","s":2,"l":"Día","a":"#c084fc"},{"t":"paint","s":3,"l":"Temperatura","a":"#ffffff","b":"#ffffff","d":0,"rb":false},{"t":"color","s":4,"l":"Máxima","a":"#fdba74"},{"t":"color","s":5,"l":"Mínima","a":"#60a5fa"},{"t":"color","s":6,"l":"Humedad","a":"#67e8f9"},{"t":"color","s":7,"l":"Líneas","a":"#334155"},{"t":"color","s":8,"l":"Fondo","a":"#000000"},{"t":"color","s":9,"l":"Días del pronóstico","a":"#e5e7eb"},{"t":"select","o":0,"l":"Datos por día","opts":[[0,"Máxima y mínima"],[1,"Máxima y humedad"]],"v":0}],"def":{"a":["#9ca3af","#ffffff","#c084fc","#ffffff","#fdba74","#60a5fa","#67e8f9","#334155","#000000","#e5e7eb"],"b":["#9ca3af","#ffffff","#c084fc","#ffffff","#fdba74","#60a5fa","#67e8f9","#334155","#000000","#e5e7eb"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,0,0,0,0,0,0,0]}},{"id":"mascotas-dia","name":"Mascotas","cat":"Divertidas","desc":"Dos gatos con sol de día y luna de noche, hora y día.","params":[{"t":"paint","s":0,"l":"Cielo","a":"#8fe3f5","b":"#d8f7ff","d":0,"rb":false},{"t":"paint","s":1,"l":"Cielo de noche","a":"#15206b","b":"#2b3a9c","d":0,"rb":false},{"t":"color","s":2,"l":"Pasto","a":"#7ed957"},{"t":"color","s":3,"l":"Marco","a":"#7ed957"},{"t":"paint","s":4,"l":"Hora","a":"#ffffff","b":"#ffffff","d":0,"rb":false},{"t":"paint","s":5,"l":"Día","a":"#ffffff","b":"#ffffff","d":0,"rb":false},{"t":"color","s":6,"l":"Gato naranja","a":"#f5a524"},{"t":"color","s":7,"l":"Gato negro","a":"#4a4e6e"},{"t":"color","s":8,"l":"Fondo del panel","a":"#000000"},{"t":"bool","o":0,"l":"Versión de noche al anochecer","v":1},{"t":"bool","o":1,"l":"Destellos","v":1}],"def":{"a":["#8fe3f5","#15206b","#7ed957","#7ed957","#ffffff","#ffffff","#f5a524","#4a4e6e","#000000","#000000"],"b":["#d8f7ff","#2b3a9c","#7ed957","#7ed957","#ffffff","#ffffff","#f5a524","#4a4e6e","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[1,1,0,0,0,0,0,0]}},{"id":"mascotas-noche","name":"Mascotas de noche","cat":"Divertidas","desc":"Los gatos dormidos bajo las estrellas, con muñeco de nieve o luna.","params":[{"t":"paint","s":0,"l":"Cielo","a":"#15206b","b":"#0b1340","d":0,"rb":false},{"t":"color","s":1,"l":"Pasto","a":"#2f9e5a"},{"t":"color","s":2,"l":"Marco","a":"#4ade80"},{"t":"paint","s":3,"l":"Hora","a":"#e0f2fe","b":"#e0f2fe","d":0,"rb":false},{"t":"paint","s":4,"l":"Día","a":"#e0f2fe","b":"#e0f2fe","d":0,"rb":false},{"t":"color","s":5,"l":"Gato naranja","a":"#f5a524"},{"t":"color","s":6,"l":"Gato negro","a":"#4a4e6e"},{"t":"color","s":7,"l":"Estrellas","a":"#fff1a8"},{"t":"color","s":8,"l":"Fondo del panel","a":"#000000"},{"t":"select","o":0,"l":"Compañero","opts":[[0,"Muñeco de nieve"],[1,"Luna"]],"v":0}],"def":{"a":["#15206b","#2f9e5a","#4ade80","#e0f2fe","#e0f2fe","#f5a524","#4a4e6e","#fff1a8","#000000","#000000"],"b":["#0b1340","#2f9e5a","#4ade80","#e0f2fe","#e0f2fe","#f5a524","#4a4e6e","#fff1a8","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,0,0,0,0,0,0,0]}},{"id":"tablero","name":"Tablero","cat":"Divertidas","desc":"Hora grande, fecha, tres imágenes tuyas y el clima.","params":[{"t":"color","s":0,"l":"Fondo","a":"#0e8a8a"},{"t":"paint","s":1,"l":"Hora","a":"#ffd23f","b":"#ff9f1c","d":0,"rb":false},{"t":"color","s":2,"l":"Franja","a":"#4ade80"},{"t":"color","s":3,"l":"Texto de la franja","a":"#064e3b"},{"t":"color","s":4,"l":"Marcos","a":"#e6fffb"},{"t":"color","s":5,"l":"Texto inferior","a":"#ffd23f"},{"t":"color","s":6,"l":"Recuadros inferiores","a":"#0b5e5e"},{"t":"images","l":"Imágenes de los recuadros"}],"def":{"a":["#0e8a8a","#ffd23f","#4ade80","#064e3b","#e6fffb","#ffd23f","#0b5e5e","#000000","#000000","#000000"],"b":["#0e8a8a","#ff9f1c","#4ade80","#064e3b","#e6fffb","#ffd23f","#0b5e5e","#000000","#000000","#000000"],"d":[0,0,0,0,0,0,0,0,0,0],"o":[0,0,0,0,0,0,0,0]}}];
+const CLOCK_CATS=['Clásicos','Simples','Clima','Divertidas'];
+const PRESETS=[['Neón','#22d3ee','#a855f7'],['Atardecer','#ff6b35','#ffd23f'],['Hielo','#e0f2fe','#38bdf8'],['Retro','#ff4d6d','#4dabf7'],['Bosque','#4ade80','#0e7490']];
+const WX_ES={0:'Despejado',1:'Poco nublado',2:'Parcialmente nublado',3:'Nublado',45:'Niebla',48:'Niebla',51:'Llovizna',53:'Llovizna',55:'Llovizna',61:'Lluvia',63:'Lluvia',65:'Lluvia fuerte',71:'Nieve',73:'Nieve',75:'Nieve',80:'Chubascos',81:'Chubascos',82:'Chubascos',95:'Tormenta',96:'Tormenta',99:'Tormenta'};
+let faceVals={},currentFace=null,simMode='auto',liveOnPanel=false,previewSeq=0,previewTimer=null,thumbTimers={},clockTick=null,clockBuilt=false,activeFace=null;
+const faceById=id=>FACES.find(f=>f.id===id)||FACES[0];
+function valsFor(id){if(!faceVals[id]){let saved=null;try{saved=JSON.parse(localStorage.getItem('ms.face.'+id))}catch(e){}const d=faceById(id).def;faceVals[id]=saved&&Array.isArray(saved.a)&&saved.a.length===10?saved:JSON.parse(JSON.stringify(d))}return faceVals[id]}
+function persistVals(id){try{localStorage.setItem('ms.face.'+id,JSON.stringify(faceVals[id]))}catch(e){}}
+function faceParams(id,extra){const v=valsFor(id),q=new URLSearchParams({face:id,h24:$('#clock24').checked?1:0,lang:$('#clockLang').value,blink:$('#clockBlink').checked?1:0});for(let i=0;i<10;i++){q.set('a'+i,v.a[i]);q.set('b'+i,v.b[i]);q.set('d'+i,v.d[i])}for(let i=0;i<8;i++)q.set('o'+i,v.o[i]);if(extra)for(const k in extra)q.set(k,extra[k]);return q}
+async function fetchFacePixels(id,extra){const r=await fetch('/api/clock/preview',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:faceParams(id,extra)});if(!r.ok)throw Error('Vista previa '+r.status);const b=new Uint8Array(await r.arrayBuffer());if(b.length!==8192)throw Error('Vista previa incompleta');return b}
+function paintLE(canvas,bytes,w,h){const x=canvas.getContext('2d'),im=x.createImageData(w,h);for(let p=0;p<w*h;p++){const v=bytes[p*2]|(bytes[p*2+1]<<8);im.data[p*4]=((v>>11)&31)*255/31;im.data[p*4+1]=((v>>5)&63)*255/63;im.data[p*4+2]=(v&31)*255/31;im.data[p*4+3]=255}x.putImageData(im,0,0)}
+function schedulePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(renderClockPreview,120)}
+async function renderClockPreview(){if(!currentFace)return;const seq=++previewSeq;try{const px=await fetchFacePixels(currentFace,{night:simMode,panel:liveOnPanel?1:0});if(seq===previewSeq)paintLE($('#clockCanvas'),px,64,64)}catch(e){}}
+function scheduleThumb(id){clearTimeout(thumbTimers[id]);thumbTimers[id]=setTimeout(()=>drawThumb(id),700)}
+async function drawThumb(id){const c=$('#thumb-'+id);if(!c)return;try{paintLE(c,await fetchFacePixels(id,{night:simMode}),64,64)}catch(e){}}
+async function drawAllThumbs(){for(const f of FACES){if(!$('#page-clock').classList.contains('active'))return;await drawThumb(f.id)}}
+
+function renderFaceGallery(){$('#faceGallery').innerHTML=CLOCK_CATS.map(cat=>`<div class="face-group">${cat}</div><div class="face-grid">`+FACES.filter(f=>f.cat===cat).map(f=>`<button class="face-card" data-face="${f.id}" title="${esc(f.desc)}"><canvas id="thumb-${f.id}" width="64" height="64"></canvas><span>${esc(f.name)}</span>${f.id===activeFace?'<i class="face-live">En el panel</i>':''}</button>`).join('')+'</div>').join('');$$('.face-card').forEach(b=>{b.classList.toggle('active',b.dataset.face===currentFace);b.onclick=()=>selectFace(b.dataset.face)})}
+function selectFace(id){currentFace=id;$$('.face-card').forEach(b=>b.classList.toggle('active',b.dataset.face===id));const f=faceById(id);$('#clockFaceTitle').textContent=f.name;$('#faceEditorTitle').textContent='Personalizar · '+f.name;$('#faceEditorDesc').textContent=f.desc;renderFaceEditor();schedulePreview();try{localStorage.setItem('ms.clockFace',id)}catch(e){}}
+
+function colorPick(i,k,val){return `<div class="color-pick"><input type="color" data-i="${i}" data-k="${k}" value="${val}" aria-label="Color"><input class="input hex" data-i="${i}" data-k="${k}hex" value="${val}" maxlength="7" spellcheck="false" aria-label="Código de color"></div>`}
+function paramHtml(p,i,v){
+  if(p.t==='color')return `<div class="param-row"><span class="param-label">${esc(p.l)}</span>${colorPick(i,'a',v.a[p.s])}</div>`;
+  if(p.t==='paint'){const d=v.d[p.s],grad=d>0,rb=d===4;const dirs=[[1,'Vertical'],[2,'Horizontal'],[3,'Diagonal']].concat(p.rb?[[4,'Arcoíris']]:[]);
+    return `<div class="param-block"><div class="param-row"><span class="param-label">${esc(p.l)}</span>${rb?'<span class="param-sub">Arcoíris</span>':colorPick(i,'a',v.a[p.s])}</div>`+
+    `<div class="param-row"><span class="param-sub">Degradado</span><label class="switch"><input type="checkbox" data-i="${i}" data-k="grad" ${grad?'checked':''}><span class="switch-track"></span></label></div>`+
+    (grad?`<div class="param-row"><span class="param-sub">Dirección</span><select class="select select-sm" data-i="${i}" data-k="dir">${dirs.map(([k,l])=>`<option value="${k}" ${d===k?'selected':''}>${l}</option>`).join('')}</select></div>`+
+      (rb?'':`<div class="param-row"><span class="param-sub">Segundo color</span>${colorPick(i,'b',v.b[p.s])}</div><div class="chips">${PRESETS.map((c,k)=>`<button class="chip" data-i="${i}" data-preset="${k}" style="--c1:${c[1]};--c2:${c[2]}">${c[0]}</button>`).join('')}</div>`):'')+`</div>`}
+  if(p.t==='bool')return `<div class="switch-row"><span>${esc(p.l)}</span><label class="switch"><input type="checkbox" data-i="${i}" data-k="bool" ${v.o[p.o]?'checked':''}><span class="switch-track"></span></label></div>`;
+  if(p.t==='select')return `<label class="field mt-3">${esc(p.l)}<select class="select mt-2" data-i="${i}" data-k="sel">${p.opts.map(([k,l])=>`<option value="${k}" ${v.o[p.o]==k?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`;
+  if(p.t==='range')return `<label class="field mt-3">${esc(p.l)}<div class="quick-range mt-2"><input type="range" min="${p.min}" max="${p.max}" step="1" data-i="${i}" data-k="range" value="${v.o[p.o]}"><span>${v.o[p.o]}</span></div></label>`;
+  if(p.t==='images')return `<div class="field mt-3">${esc(p.l)}</div><div class="slot-grid mt-2">${[0,1,2].map(k=>`<div class="slot"><canvas class="slot-canvas" id="slot-${k}" width="18" height="18"></canvas><div class="slot-actions"><label class="btn btn-sm">Subir<input type="file" accept="image/*" class="file-native" data-slot="${k}"></label><button class="btn btn-sm" data-slot-gallery="${k}">Galería</button><button class="btn btn-sm btn-danger" data-slot-clear="${k}">Quitar</button></div></div>`).join('')}</div>`;
+  return ''}
+function renderFaceEditor(){const f=faceById(currentFace),v=valsFor(currentFace),colors=f.params.map((p,i)=>[p,i]).filter(([p])=>p.t==='color'||p.t==='paint'),other=f.params.map((p,i)=>[p,i]).filter(([p])=>p.t!=='color'&&p.t!=='paint');
+  $('#faceEditor').innerHTML=(colors.length?`<details class="param-sec" open><summary>Colores</summary>${colors.map(([p,i])=>paramHtml(p,i,v)).join('')}</details>`:'')+(other.length?`<details class="param-sec" open><summary>Contenido</summary>${other.map(([p,i])=>paramHtml(p,i,v)).join('')}</details>`:'');
+  if(f.params.some(p=>p.t==='images'))loadSlotThumbs()}
+function onParam(e){const t=e.target,i=+t.dataset.i;if(t.dataset.i===undefined||isNaN(i))return;const k=t.dataset.k,f=faceById(currentFace),p=f.params[i],v=valsFor(currentFace);if(!p)return;
+  if((t.type==='checkbox'||t.tagName==='SELECT')&&e.type==='input')return;
+  if(k==='a'||k==='b'){v[k][p.s]=t.value;const h=t.parentElement.querySelector('.hex');if(h)h.value=t.value}
+  else if(k==='ahex'||k==='bhex'){if(!/^#[0-9a-f]{6}$/i.test(t.value))return;v[k[0]][p.s]=t.value.toLowerCase();const c=t.parentElement.querySelector('input[type=color]');if(c)c.value=t.value.toLowerCase()}
+  else if(k==='grad'){v.d[p.s]=t.checked?1:0;persistVals(currentFace);renderFaceEditor();schedulePreview();scheduleThumb(currentFace);return}
+  else if(k==='dir'){v.d[p.s]=+t.value;persistVals(currentFace);renderFaceEditor();schedulePreview();scheduleThumb(currentFace);return}
+  else if(k==='bool')v.o[p.o]=t.checked?1:0;
+  else if(k==='sel')v.o[p.o]=+t.value;
+  else if(k==='range'){v.o[p.o]=+t.value;t.nextElementSibling.textContent=t.value}
+  else return;
+  persistVals(currentFace);schedulePreview();scheduleThumb(currentFace)}
+function onParamClick(e){const chip=e.target.closest('.chip');if(chip){const p=faceById(currentFace).params[+chip.dataset.i],v=valsFor(currentFace),c=PRESETS[+chip.dataset.preset];v.a[p.s]=c[1];v.b[p.s]=c[2];if(!v.d[p.s]||v.d[p.s]===4)v.d[p.s]=1;persistVals(currentFace);renderFaceEditor();schedulePreview();scheduleThumb(currentFace);return}
+  const g=e.target.closest('[data-slot-gallery]');if(g){pickSlotFromGallery(+g.dataset.slotGallery);return}
+  const c=e.target.closest('[data-slot-clear]');if(c){clearSlot(+c.dataset.slotClear)}}
+$('#faceEditor').addEventListener('input',onParam);$('#faceEditor').addEventListener('change',onParam);$('#faceEditor').addEventListener('click',onParamClick);
+$('#faceEditor').addEventListener('change',e=>{const t=e.target;if(t.dataset.slot===undefined||!t.files||!t.files[0])return;const k=+t.dataset.slot,img=new Image();img.onload=()=>{uploadSlot(k,toSlotBytes(img));URL.revokeObjectURL(img.src)};img.onerror=()=>toast('No pude leer esa imagen','err');img.src=URL.createObjectURL(t.files[0]);t.value=''});
+
+// Pictures of the "Tablero" face: 18x18 RGB565 little endian in /config/slotN.rgb565
+function toSlotBytes(src){const c=document.createElement('canvas');c.width=18;c.height=18;const x=c.getContext('2d'),sc=Math.max(18/src.width,18/src.height),w=src.width*sc,h=src.height*sc;x.imageSmoothingEnabled=true;x.drawImage(src,(18-w)/2,(18-h)/2,w,h);const d=x.getImageData(0,0,18,18).data,out=new Uint8Array(648);for(let p=0;p<324;p++){const v=((d[p*4]&248)<<8)|((d[p*4+1]&252)<<3)|(d[p*4+2]>>3);out[p*2]=v&255;out[p*2+1]=v>>8}return out}
+function drawSlotThumb(k,bytes){const c=$('#slot-'+k);if(!c)return;if(!bytes||bytes.length!==648){c.getContext('2d').clearRect(0,0,18,18);c.classList.add('empty');return}c.classList.remove('empty');paintLE(c,bytes,18,18)}
+async function loadSlotThumbs(){for(let k=0;k<3;k++){try{const r=await fetch('/api/fs/read?path='+encodeURIComponent('/config/slot'+k+'.rgb565'),{cache:'no-store'});drawSlotThumb(k,r.ok?new Uint8Array(await r.arrayBuffer()):null)}catch(e){drawSlotThumb(k,null)}}}
+async function uploadSlot(k,bytes){try{await uploadXHR('/api/fs/upload?path='+encodeURIComponent('/config/slot'+k+'.rgb565'),'file',new Blob([bytes],{type:'application/octet-stream'}),'slot'+k+'.rgb565','Guardando imagen');drawSlotThumb(k,bytes);toast('Imagen '+(k+1)+' guardada');schedulePreview();scheduleThumb('tablero')}catch(e){toast(e.message,'err')}}
+async function clearSlot(k){await fetch('/api/fs/delete?path='+encodeURIComponent('/config/slot'+k+'.rgb565'),{method:'DELETE'});drawSlotThumb(k,null);schedulePreview();scheduleThumb('tablero')}
+async function pickSlotFromGallery(k){let d;try{d=await (await fetch('/api/gallery')).json()}catch(e){return toast('No pude leer la galería','err')}const imgs=d.images||[];if(!imgs.length)return toast('Tu galería no tiene imágenes todavía','err');
+  const dlg=document.createElement('dialog');dlg.innerHTML=`<div class="dialog-head">Imagen ${k+1} desde la galería</div><div class="dialog-body"><div class="pick-grid">${imgs.map((it,i)=>`<button class="pick" data-i="${i}" disabled><canvas width="64" height="64"></canvas><span>${esc(it.name)}</span></button>`).join('')}</div></div><div class="dialog-foot"><button class="btn cancel">Cancelar</button></div>`;
+  document.body.appendChild(dlg);dlg.showModal();const close=()=>{dlg.close();dlg.remove()};dlg.querySelector('.cancel').onclick=close;
+  for(const b of dlg.querySelectorAll('.pick')){const it=imgs[+b.dataset.i];try{const u=new Uint8Array(await (await fetch('/api/fs/read?path='+encodeURIComponent('/gallery/images/'+it.name))).arrayBuffer());if(u.length!==8192)continue;const c=b.querySelector('canvas'),x=c.getContext('2d'),im=x.createImageData(64,64);for(let p=0;p<4096;p++){const v=(u[p*2]<<8)|u[p*2+1];im.data[p*4]=((v>>11)&31)*255/31;im.data[p*4+1]=((v>>5)&63)*255/63;im.data[p*4+2]=(v&31)*255/31;im.data[p*4+3]=255}x.putImageData(im,0,0);b.disabled=false;b.onclick=()=>{uploadSlot(k,toSlotBytes(c));close()}}catch(e){}if(!dlg.open)return}}
+
+// Weather + location
+function renderWx(s){const box=$('#wxNow');if(!box)return;const L=$('#clockLang').value==='1'?['SU','MO','TU','WE','TH','FR','SA']:['DO','LU','MA','MI','JU','VI','SA'];
+  box.innerHTML=s.weatherValid?`<b>${Math.round(s.temp)}°C</b> · ${Math.round(s.humidity)}% · ${esc(WX_ES[s.weatherCode]||'—')} <span class="muted">${s.night?'· de noche':'· de día'}</span>`:'<span class="muted">Sin datos del clima todavía</span>';
+  const wd=new Date().getDay();$('#wxDays').innerHTML=(s.days||[]).map((d,i)=>`<div class="wx-day"><b>${L[(wd+i)%7]}</b>${d.valid?`<span class="t-max">${Math.round(d.max)}°</span> <span class="t-min">${Math.round(d.min)}°</span><small>${Math.round(d.hum)}% · ${esc(WX_ES[d.code]||'')}</small>`:'<small class="muted">—</small>'}</div>`).join('')}
+async function loadClockStatus(){try{const s=await (await fetch('/api/clock/status',{cache:'no-store'})).json();activeFace=s.enabled?s.face:null;
+  $('#clockState').textContent=s.enabled?'En el panel: '+faceById(s.face).name:'Inactivo';$('#clockDot').classList.toggle('off',!s.enabled);
+  $('#clock24').checked=!!s.h24;$('#clockBlink').checked=!!s.blink;$('#clockLang').value=String(s.lang||0);
+  if(s.face&&FACES.some(f=>f.id===s.face)&&Array.isArray(s.a)){faceVals[s.face]={a:s.a.slice(0,10),b:s.b.slice(0,10),d:s.d.slice(0,10),o:s.o.slice(0,8)};persistVals(s.face)}
+  if(!currentFace){let last=null;try{last=localStorage.getItem('ms.clockFace')}catch(e){}currentFace=(s.enabled&&s.face)||(FACES.some(f=>f.id===last)?last:FACES[0].id)}
+  if(s.brightness)setBrightness(s.brightness);$('#cityName').textContent=s.city||'—';renderWx(s);return s}catch(e){toast('No pude leer el estado del reloj','err');return null}}
+async function clockEnter(){await loadClockStatus();if(!currentFace)currentFace=FACES[0].id;renderFaceGallery();selectFace(currentFace);drawAllThumbs();clearInterval(clockTick);clockTick=setInterval(()=>{if($('#page-clock').classList.contains('active'))renderClockPreview()},5000)}
+function clockLeave(){clearInterval(clockTick);clockTick=null;if(liveOnPanel){liveOnPanel=false;$('#clockLive').checked=false;fetch('/api/clock/preview/end',{method:'POST'})}}
+async function citySearch(){const q=$('#citySearch').value.trim(),box=$('#cityResults');if(!q)return;box.innerHTML='<div class="muted">Buscando…</div>';
+  try{const d=await (await fetch('https://geocoding-api.open-meteo.com/v1/search?count=6&language=es&format=json&name='+encodeURIComponent(q))).json(),res=d.results||[];
+    box.innerHTML=res.length?res.map((c,i)=>`<button class="city-item" data-i="${i}"><b>${esc(c.name)}</b><span>${esc([c.admin1,c.country].filter(Boolean).join(', '))}</span></button>`).join(''):'<div class="muted">Sin resultados.</div>';
+    box.querySelectorAll('.city-item').forEach(b=>b.onclick=()=>setCity(res[+b.dataset.i]))}
+  catch(e){box.innerHTML='<div class="muted">No se pudo buscar. Este dispositivo necesita Internet para buscar la ciudad.</div>'}}
+async function setCity(c){const r=await fetch('/api/location',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({name:c.name,lat:c.latitude,lon:c.longitude})});if(!r.ok)return toast(await r.text(),'err');$('#cityName').textContent=c.name;$('#cityResults').innerHTML='';$('#citySearch').value='';toast('Ubicación: '+c.name+'. Actualizando el clima…');setTimeout(loadClockStatus,6000);setTimeout(loadClockStatus,15000)}
+$('#citySearchBtn').onclick=citySearch;$('#citySearch').onkeydown=e=>{if(e.key==='Enter')citySearch()};
+$('#refreshWeather').onclick=async()=>{await fetch('/api/clock/weather',{method:'POST'});toast('Consultando el clima…');setTimeout(loadClockStatus,5000)};
+$$('#clockSim .seg').forEach(b=>b.onclick=()=>{simMode=b.dataset.sim;$$('#clockSim .seg').forEach(x=>x.classList.toggle('active',x===b));schedulePreview()});
+$('#clockLive').onchange=e=>{liveOnPanel=e.target.checked;if(liveOnPanel){schedulePreview();toast('Mostrando la vista previa en el panel')}else fetch('/api/clock/preview/end',{method:'POST'})};
+['clock24','clockBlink','clockLang'].forEach(id=>$('#'+id).onchange=()=>{schedulePreview();clearTimeout(thumbTimers._all);thumbTimers._all=setTimeout(drawAllThumbs,800)});
+$('#resetFace').onclick=()=>{if(!currentFace)return;faceVals[currentFace]=JSON.parse(JSON.stringify(faceById(currentFace).def));persistVals(currentFace);renderFaceEditor();schedulePreview();scheduleThumb(currentFace);toast('Colores y opciones por defecto')};
+$('#activateClock').onclick=async()=>{if(!currentFace)return;showLoader('Aplicando carátula','Enviando al panel…',55);const r=await fetch('/api/clock/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:faceParams(currentFace)});hideLoader();if(!r.ok)return toast(await r.text(),'err');liveOnPanel=false;$('#clockLive').checked=false;activeFace=currentFace;$('#clockState').textContent='En el panel: '+faceById(currentFace).name;$('#clockDot').classList.remove('off');renderFaceGallery();drawAllThumbs();toast(faceById(currentFace).name+' en el panel')};
+$('#stopClock').onclick=async()=>{await fetch('/api/clock/stop',{method:'POST'});activeFace=null;$('#clockState').textContent='Inactivo';$('#clockDot').classList.add('off');renderFaceGallery();drawAllThumbs();toast('Modo reloj desactivado')};
 
 // LIBRARY
 const presets=[{name:'Corazón',draw:c=>{black(c);c.fillStyle='#ef3340';[[3,1],[4,1],[2,2],[3,2],[4,2],[5,2],[1,3],[2,3],[3,3],[4,3],[5,3],[6,3],[2,4],[3,4],[4,4],[5,4],[3,5],[4,5]].forEach(([x,y])=>c.fillRect(x*8,y*8,8,8))}},{name:'Carita',draw:c=>{black(c);c.fillStyle='#ffd84d';c.fillRect(8,8,48,48);c.fillStyle='#111';c.fillRect(20,22,6,6);c.fillRect(38,22,6,6);c.fillRect(20,42,24,5);c.fillRect(16,37,5,5);c.fillRect(43,37,5,5)}},{name:'Estrella',draw:c=>{black(c);c.fillStyle='#ffe347';const pts=[[32,5],[39,24],[59,24],[43,36],[49,57],[32,44],[15,57],[21,36],[5,24],[25,24]];c.beginPath();pts.forEach((p,i)=>i?c.lineTo(...p):c.moveTo(...p));c.closePath();c.fill()}},{name:'Nebulosa',draw:c=>{black(c);for(let y=0;y<64;y+=4)for(let x=0;x<64;x+=4){c.fillStyle=`hsl(${(x*4+y*2)%280+190} 85% ${25+((x+y)%20)}%)`;c.fillRect(x,y,4,4)};c.fillStyle='#fff';[[8,9],[49,12],[22,44],[57,51],[35,26]].forEach(p=>c.fillRect(...p,2,2))}},{name:'Flor',draw:c=>{black(c);c.fillStyle='#22c55e';c.fillRect(30,30,4,30);c.fillStyle='#ff78c6';[[30,14],[22,22],[38,22],[22,30],[38,30]].forEach(([x,y])=>c.fillRect(x,y,8,8));c.fillStyle='#ffd84d';c.fillRect(30,22,8,8)}},{name:'Robot',draw:c=>{black(c);c.fillStyle='#5ee7f7';c.fillRect(12,14,40,36);c.fillStyle='#07101d';c.fillRect(20,24,8,8);c.fillRect(36,24,8,8);c.fillRect(20,39,24,4);c.fillStyle='#ff6b35';c.fillRect(29,7,6,7)}}];
@@ -654,7 +874,7 @@ function renderStatus(s){
     card('Pantalla','image',row('Mostrando',esc(showingText(s)))+(s.animPlaying?row('Frames',s.animFrames):'')+row('Brillo',s.brightness)+row('Reloj',s.clockEnabled?'Activo':'Inactivo')+row('Último render',s.lastRenderMs+' ms'))+
     card('Sistema','panel',row('Encendido hace',fmtUptime(s.uptimeS))+row('Último reinicio',esc(s.resetReason))+row('RAM libre',`${fmtBytes(s.heapFree)} de ${fmtBytes(s.heapSize)}`)+meter(heapPct)+row('RAM mínima',fmtBytes(s.heapMin))+row('PSRAM libre',s.psramSize?`${fmtBytes(s.psramFree)} de ${fmtBytes(s.psramSize)}`:'No detectada')+row('Chip',`${esc(s.chip)} · ${s.cpuMHz} MHz`))+
     card('Almacenamiento','admin',row('microSD',`${s.sdUsedMB} / ${s.sdTotalMB} MB`)+meter(sdPct)+row('Firmware',`${fmtBytes(s.sketchSize)} de ${fmtBytes(s.sketchFree)} (slot OTA)`)+meter(fwPct)+row('Web assets','v'+esc(s.webVersion))+row('Compilado',esc(s.build)))+
-    card('Clima','clock',s.weatherValid?row('Temperatura',s.temp+' °C')+row('Humedad',s.humidity+'%'):row('Estado','Sin datos todavía'));
+    card('Clima','clock',row('Ciudad',esc(s.city||'—'))+(s.weatherValid?row('Temperatura',s.temp+' °C')+row('Humedad',s.humidity+'%'):row('Estado','Sin datos todavía')));
 }
 const logClass=m=>/ERROR|fallido|panic/i.test(m)?'err':/ADVERTENCIA|perdido|reinici/i.test(m)?'warn':/ OK|listo|correctamente|restaurado|reconectado|instalado|actualizado/i.test(m)?'ok':'';
 function renderLog(){
@@ -915,7 +1135,7 @@ bool writeText(const char* path, const char* src){
   f.close(); return true;
 }
 
-const char* WEB_ASSET_VERSION = "5.6";
+const char* WEB_ASSET_VERSION = "5.7";
 
 void provisionWeb(){
   ensureDir(WWW_DIR);
@@ -1017,7 +1237,7 @@ bool playAnim(const String& p){
   animIndex=0;animationPlaying=true;nextAnimAt=millis();return true;
 }
 void serviceAnim(){
-  if(!animationPlaying||!animFile||millis()<nextAnimAt)return;
+  if(previewHoldUntil||!animationPlaying||!animFile||millis()<nextAnimAt)return;
   if(animPmaV2){
     // Header is 10 bytes; each frame block is 2-byte delay + FRAME_BYTES pixels.
     size_t off=10+(size_t)animIndex*(2+FRAME_BYTES);
@@ -1069,33 +1289,133 @@ const char* weatherShort(int code) {
   return "CLM";
 }
 
+// Position right after "key":<open> ('{' or '['), searching from `from`; -1 if absent.
+int jsonFind(const String& s, int from, const char* key, char open) {
+  if (from < 0) return -1;
+  String needle = String("\"") + key + "\":" + open;
+  int p = s.indexOf(needle, from);
+  return p < 0 ? -1 : p + needle.length();
+}
+
+// Like jsonNumber() but starting at `from`, so a key is read from the right
+// object (Open-Meteo repeats every key in the *_units objects as text).
+float jsonNumberFrom(const String& s, int from, const char* key, float fallback) {
+  if (from < 0) return fallback;
+  String needle = String("\"") + key + "\":";
+  int p = s.indexOf(needle, from);
+  if (p < 0) return fallback;
+  p += needle.length();
+  while (p < (int)s.length() && s[p] == ' ') p++;
+  int e = p;
+  while (e < (int)s.length()) {
+    char c = s[e];
+    if ((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E') e++;
+    else break;
+  }
+  return e > p ? s.substring(p, e).toFloat() : fallback;
+}
+
+// Reads up to maxN numbers of the array "key":[...] found after `from`.
+// null entries become NAN. Returns how many entries were read.
+int jsonNumbers(const String& s, int from, const char* key, float* out, int maxN) {
+  int p = jsonFind(s, from, key, '[');
+  if (p < 0) return 0;
+  int n = 0;
+  while (n < maxN && p < (int)s.length()) {
+    while (p < (int)s.length() && s[p] == ' ') p++;
+    if (p >= (int)s.length() || s[p] == ']') break;
+    int e = p;
+    while (e < (int)s.length() && s[e] != ',' && s[e] != ']') e++;
+    String v = s.substring(p, e);
+    v.trim();
+    out[n++] = (v.length() == 0 || v == "null") ? NAN : v.toFloat();
+    p = e;
+    if (p < (int)s.length() && s[p] == ',') p++;
+  }
+  return n;
+}
+
+// First "YYYY-MM-DDTHH:MM" of the array "key":[...] as minutes after midnight, or -1.
+int jsonFirstHHMM(const String& s, int from, const char* key) {
+  int p = jsonFind(s, from, key, '[');
+  if (p < 0) return -1;
+  int t = s.indexOf('T', p);
+  if (t < 0 || t + 5 >= (int)s.length()) return -1;
+  int hh = s.substring(t + 1, t + 3).toInt(), mm = s.substring(t + 4, t + 6).toInt();
+  return (hh >= 0 && hh < 24 && mm >= 0 && mm < 60) ? hh * 60 + mm : -1;
+}
+
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
+  LocationCfg loc;
+  portENTER_CRITICAL(&wxMux);
+  loc = location;
+  portEXIT_CRITICAL(&wxMux);
+  char url[360];
+  snprintf(url, sizeof(url),
+           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+           "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,is_day"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,relative_humidity_2m_mean,sunrise,sunset"
+           "&forecast_days=4&timezone=auto",
+           loc.lat, loc.lon);
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  String url = "https://api.open-meteo.com/v1/forecast?latitude=19.0414&longitude=-98.2063&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code&timezone=America%2FMexico_City";
   if (!http.begin(client, url)) return;
   http.setConnectTimeout(5000);
   http.setTimeout(7000);
-  http.setUserAgent("MatrixStudioClock/5.0");
+  http.setUserAgent("MatrixStudioClock/6.0");
   int code = http.GET();
-  if (code >= 200 && code < 300) {
-    String body = http.getString();
-    float t = jsonNumber(body, "temperature_2m", weatherTempC);
-    float h = jsonNumber(body, "relative_humidity_2m", weatherHumidityPct);
-    float f = jsonNumber(body, "apparent_temperature", weatherFeelsC);
-    int wc = (int)jsonNumber(body, "weather_code", weatherCode);
-    weatherTempC = t;
-    weatherHumidityPct = h;
-    weatherFeelsC = f;
-    weatherCode = wc;
-    weatherValid = true;
-    Log.println("Clima actualizado: " + String(t, 1) + " C, " + String(h, 0) + "% humedad");
-  } else {
+  if (code < 200 || code >= 300) {
     Log.println("ERROR clima: HTTP " + String(code));
+    http.end();
+    return;
   }
+  String body = http.getString();
   http.end();
+  int cur = jsonFind(body, 0, "current", '{');
+  int daily = jsonFind(body, 0, "daily", '{');
+  float t = jsonNumberFrom(body, cur, "temperature_2m", NAN);
+  if (isnan(t)) {
+    Log.println("ERROR clima: respuesta sin datos");
+    return;
+  }
+  float h = jsonNumberFrom(body, cur, "relative_humidity_2m", 0);
+  float f = jsonNumberFrom(body, cur, "apparent_temperature", t);
+  int wc = (int)jsonNumberFrom(body, cur, "weather_code", -1);
+  bool isDay = jsonNumberFrom(body, cur, "is_day", 1) != 0;
+  float dc[4], dmax[4], dmin[4], dhum[4];
+  int nc = jsonNumbers(body, daily, "weather_code", dc, 4);
+  int nx = jsonNumbers(body, daily, "temperature_2m_max", dmax, 4);
+  int nn = jsonNumbers(body, daily, "temperature_2m_min", dmin, 4);
+  int nh = jsonNumbers(body, daily, "relative_humidity_2m_mean", dhum, 4);
+  int sunrise = jsonFirstHHMM(body, daily, "sunrise");
+  int sunset = jsonFirstHHMM(body, daily, "sunset");
+  int32_t offset = (int32_t)jsonNumber(body, "utc_offset_seconds", (float)loc.utcOffset);
+
+  portENTER_CRITICAL(&wxMux);
+  weatherTempC = t;
+  weatherHumidityPct = h;
+  weatherFeelsC = f;
+  weatherCode = wc;
+  weatherIsDay = isDay;
+  wxSunriseMin = sunrise;
+  wxSunsetMin = sunset;
+  for (int i = 0; i < 4; i++) {
+    bool ok = i < nc && i < nx && i < nn && !isnan(dc[i]) && !isnan(dmax[i]) && !isnan(dmin[i]);
+    wxDays[i].valid = ok;
+    wxDays[i].code = ok ? (int)dc[i] : -1;
+    wxDays[i].tmax = ok ? dmax[i] : 0;
+    wxDays[i].tmin = ok ? dmin[i] : 0;
+    wxDays[i].hum = (ok && i < nh && !isnan(dhum[i])) ? dhum[i] : 0;
+  }
+  weatherValid = true;
+  if (offset != location.utcOffset && offset > -50400 && offset < 50400) {
+    pendingUtcOffset = offset;
+    utcOffsetPending = true;
+  }
+  portEXIT_CRITICAL(&wxMux);
+  Log.println("Clima actualizado: " + String(t, 1) + " C, " + String(h, 0) + "% humedad, " + String(loc.name));
 }
 
 void weatherTask(void* parameter) {
@@ -1110,154 +1430,1211 @@ void weatherTask(void* parameter) {
   }
 }
 
-void drawCenteredText(const String& value, int y, uint8_t size, uint16_t color) {
-  int width = value.length() * 6 * size;
-  int x = (64 - width) / 2;
-  if (x < 0) x = 0;
-  display.setTextSize(size);
-  display.setTextColor(color);
-  display.setCursor(x, y);
-  display.print(value);
+// Applies a UTC offset (seconds) to local time, e.g. -21600 -> "<-06>6".
+void applyUtcOffset(int32_t off) {
+  int32_t a = off < 0 ? -off : off;
+  int hh = a / 3600, mm = (a % 3600) / 60;
+  char tz[32];
+  char sign = off < 0 ? '-' : '+', posix = off < 0 ? '+' : '-';
+  if (mm) snprintf(tz, sizeof(tz), "<%c%02d%02d>%c%d:%02d", sign, hh, mm, posix, hh, mm);
+  else snprintf(tz, sizeof(tz), "<%c%02d>%c%d", sign, hh, posix, hh);
+  setenv("TZ", tz, 1);
+  tzset();
 }
 
-void drawWeatherIcon(int x, int y, int code, uint16_t color) {
-  if (code == 0) {
-    display.drawCircle(x, y, 4, color);
-    display.drawLine(x, y - 8, x, y - 6, color);
-    display.drawLine(x, y + 6, x, y + 8, color);
-    display.drawLine(x - 8, y, x - 6, y, color);
-    display.drawLine(x + 6, y, x + 8, y, color);
+// >>> FACE ART
+// Pixel art: '.' is transparent, other chars index the palette (RGB565).
+static const uint16_t PAL_cat_a[] = {0xF524,0xDBA3,0x3BDF,0x38E2,0xFFFF,0x6943,0xDA8D,0x79A2,0xFBD3,0xFF99,0xFE87};
+static const Sprite SPR_cat_a = {26, 30, "abcehmnopwy", PAL_cat_a,
+  "......oo..............oo.."
+  "......oao............oao.."
+  "......opao..........oapo.."
+  ".....oappao.oooooo.oappao."
+  ".....oappaaoaaaaaaoaappao."
+  ".....oaaaaaaaaaaaaaaaaaao."
+  ".....oaaaaaaaaaaaaaaaaaao."
+  ".....oaaaawwaaaaaawwaaaao."
+  ".....oaaaaaaaaaaaaaaaaaao."
+  ".....oaaaaheaaaaaaheaaaao."
+  ".....oaaaaeeaaaaaaeeaaaao."
+  ".....owwaaeeawwwwaeeaawwo."
+  ".....owppwwwwwnnwwwwwppwo."
+  ".....owwwwwwmwwwwmwwwwwwo."
+  ".....owwwwwwwmmmmwwwwwwwo."
+  "..ooooowwwwwwwwwwwwwwwwo.."
+  ".oaaaaooooooooooooooooo..."
+  "oaaawwwo.occccyycccco....."
+  "oaaoooo.obbbwwyywwbbbo...."
+  "oaao...oaaaaawwwwaaaaao..."
+  "oaao...oaaoaawwwwaaoaao..."
+  "oaaao..oaaoaawwwwaaoaao..."
+  ".oaaaooowwoaawwwwaaowwo..."
+  ".obaaaaooooaaawwaaaooo...."
+  "..obbaaa.obaaaaaaaabo....."
+  "...oooo..obaaaooaaabo....."
+  ".........obaao..oaabo....."
+  ".........obaao..oaabo....."
+  ".........owwwo..owwwo....."
+  ".........ooooo..ooooo....."};
+static const uint16_t PAL_cat_b[] = {0x4A6D,0x39EB,0x2E8B,0xFE87,0xFFFF,0x18A4,0xCAAF,0xFC76,0x2907,0xFBF5,0xF7BF,0xFE87};
+static const Sprite SPR_cat_b = {26, 30, "abcehkmnopwy", PAL_cat_b,
+  ".........................."
+  "..oo..............oo......"
+  "..opo...oooooo...opo......"
+  "..oppoooaaaaaaoooppo......"
+  ".oappaaaaaaaaaaaappao....."
+  ".oaaaaaaaaaaaaaaaaaao....."
+  ".oaaaaaaaaaaaaaaaaaao....."
+  ".oaaaaaaaawwaaaaaaaao....."
+  ".oaaaheeaawwaaheeaaao....."
+  ".oaaaekeawwwwaekeaaao....."
+  ".oaaaekeawwwwaekeaaao.ooo."
+  ".oaaaaaaawwwwaaaaaaaoowwwo"
+  ".oappawwwwnnwwwwappaoowwao"
+  ".oaawwwwmwwwwmwwwwaao.oaao"
+  ".oaawwwwwmmmmwwwwwaao.oaao"
+  "..oawwwwwwwwwwwwwwao.oaao."
+  "...oooooooooooooooo.oaao.."
+  ".....occccyycccco..oaao..."
+  "....obbbwwyywwbbbo.oaao..."
+  "...oaaaawwwwwwaaaaooaao..."
+  "...oaaoaawwwwaaoaaooaao..."
+  "...oaaoaawwwwaaoaaoaao...."
+  "...owwoaawwwwaaowwoaao...."
+  "....oooaaawwaaaoooaao....."
+  ".....obaaaaaaaabo.oo......"
+  ".....obaaaooaaabo........."
+  ".....obaao..oaabo........."
+  ".....obaao..oaabo........."
+  ".....owwwo..owwwo........."
+  ".....ooooo..ooooo........."};
+static const uint16_t PAL_wx_clear_day_10[] = {0xFFB8,0xFCE3,0xFE87};
+static const Sprite SPR_wx_clear_day_10 = {10, 10, "hoy", PAL_wx_clear_day_10,
+  "....oo...."
+  ".o......o."
+  "...yyyy..."
+  "..yhhyyy.."
+  "o.yhyyyy.o"
+  "o.yyyyyo.o"
+  "..yyyyoo.."
+  "...oooo..."
+  ".o......o."
+  "....oo...."};
+static const uint16_t PAL_wx_clear_day_20[] = {0xFFB8,0xFCE3,0xFE87};
+static const Sprite SPR_wx_clear_day_20 = {20, 20, "hoy", PAL_wx_clear_day_20,
+  "...................."
+  ".........oo........."
+  "..o......oo......o.."
+  "...o.....oo.....o..."
+  "....o..........o...."
+  ".......yyyyyy......."
+  "......yyyyyyyy......"
+  ".....yyhhyyyyyy....."
+  ".....yhyyyyyyyy....."
+  ".ooo.yhyyyyyyyy.ooo."
+  ".ooo.yyyyyyyyyo.ooo."
+  ".....yyyyyyyyyo....."
+  ".....yyyyyyyyoo....."
+  "......yyyyyooo......"
+  ".......oooooo......."
+  "....o..........o...."
+  "...o.....oo.....o..."
+  "..o......oo......o.."
+  ".........oo........."
+  "...................."};
+static const uint16_t PAL_wx_clear_night_10[] = {0xFF95,0xFFFF,0xFF95};
+static const Sprite SPR_wx_clear_night_10 = {10, 10, "akm", PAL_wx_clear_night_10,
+  ".........."
+  "...m....a."
+  "..mm...aka"
+  ".mmm....a."
+  ".mmm......"
+  ".mmmm....k"
+  ".mmmmm..m."
+  "..mmmmmmm."
+  "...mmmmm.."
+  ".........."};
+static const uint16_t PAL_wx_clear_night_20[] = {0xFF95,0xFFFF,0xFF95};
+static const Sprite SPR_wx_clear_night_20 = {20, 20, "akm", PAL_wx_clear_night_20,
+  "...................."
+  "...................."
+  ".......m......a....."
+  ".....mmm.....aka...."
+  "....mmm.......a....."
+  "...mmmm............."
+  "..mmmmm............."
+  "..mmmmm............."
+  ".mmmmmm...........k."
+  ".mmmmmm............."
+  ".mmmmmm............."
+  ".mmmmmmm............"
+  ".mmmmmmmm..........."
+  "..mmmmmmmmm.....m..."
+  "..mmmmmmmmmmmmmmm..."
+  "...mmmmmmmmmmmmm...."
+  "....mmmmmmmmmmm....."
+  ".....mmmmmmmmm......"
+  ".......mmmmm........"
+  "...................."};
+static const uint16_t PAL_wx_cloudy_10[] = {0x6BF2,0x8CF6,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_cloudy_10 = {10, 10, "Ggstw", PAL_wx_cloudy_10,
+  ".........."
+  "......gg.."
+  "....ggggg."
+  "...ggggggg"
+  "......gggG"
+  "...ww...gG"
+  ".wwwwwt..G"
+  "wwwwwwwt.."
+  "twwwwwtt.."
+  ".ssssss..."};
+static const uint16_t PAL_wx_cloudy_20[] = {0x6BF2,0x8CF6,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_cloudy_20 = {20, 20, "Ggstw", PAL_wx_cloudy_20,
+  "...................."
+  "...................."
+  "...................."
+  "............gggg...."
+  "..........gggggggg.."
+  ".........gggggggggg."
+  "......gg.ggggggggggg"
+  ".....ggg......gggggg"
+  ".....g...wwww...gggg"
+  ".......wwwwwwww..ggg"
+  "......wwwwwwwwww..gG"
+  "...ww.wwwwwwwwwwt..."
+  "..wwwwwwwwwwwwwwtt.."
+  ".wwwwwwwwwwwwwwwwtt."
+  ".wwwwwwwwwwwwwwwwwt."
+  ".twwwwwwwwwwwwwwwtt."
+  ".ttttttttttttttttts."
+  "..ssssssssssssssss.."
+  "...................."
+  "...................."};
+static const uint16_t PAL_wx_drizzle_10[] = {0x7E3F,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_drizzle_10 = {10, 10, "cstw", PAL_wx_drizzle_10,
+  "....www..."
+  ".ww.wwwwt."
+  "wwwwwwwwwt"
+  "twwwwwwwtt"
+  ".ssssssss."
+  ".........."
+  "..c....c.."
+  "..c....c.."
+  ".........."
+  "....c....c"};
+static const uint16_t PAL_wx_drizzle_20[] = {0x7E3F,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_drizzle_20 = {20, 20, "cstw", PAL_wx_drizzle_20,
+  "...................."
+  ".........wwww......."
+  ".......wwwwwwww....."
+  "......wwwwwwwwww...."
+  "...ww.wwwwwwwwwwt..."
+  "..wwwwwwwwwwwwwwtt.."
+  ".wwwwwwwwwwwwwwwwtt."
+  ".wwwwwwwwwwwwwwwwwt."
+  ".twwwwwwwwwwwwwwwtt."
+  ".ttttttttttttttttts."
+  "..ssssssssssssssss.."
+  "...................."
+  "...................."
+  "....c.....c.....c..."
+  "....c.....c.....c..."
+  "...................."
+  ".......c.....c......"
+  ".......c.....c......"
+  "...................."
+  "...................."};
+static const uint16_t PAL_wx_fog_10[] = {0x9516,0xCE9B};
+static const Sprite SPR_wx_fog_10 = {10, 10, "Zz", PAL_wx_fog_10,
+  "....zzz..."
+  ".zz.zzzz.."
+  "zzzzzzzzz."
+  ".ZZZZZZZZ."
+  ".........."
+  "zzzzzzzz.."
+  ".........."
+  "..zzzzzzzz"
+  ".........."
+  ".ZZZZZZ..."};
+static const uint16_t PAL_wx_fog_20[] = {0x9516,0xCE9B};
+static const Sprite SPR_wx_fog_20 = {20, 20, "Zz", PAL_wx_fog_20,
+  "...................."
+  ".........zzzz......."
+  ".......zzzzzzzz....."
+  "......zzzzzzzzzz...."
+  "...zz.zzzzzzzzzzz..."
+  "..zzzzzzzzzzzzzzzz.."
+  ".zzzzzzzzzzzzzzzzzz."
+  ".zzzzzzzzzzzzzzzzzz."
+  ".zzzzzzzzzzzzzzzzzz."
+  ".zzzzzzzzzzzzzzzzzZ."
+  "..ZZZZZZZZZZZZZZZZ.."
+  "...................."
+  "...................."
+  "..zzzzzzzzzzzzzz...."
+  "...................."
+  "...................."
+  ".....zzzzzzzzzzzzzz."
+  "...................."
+  "...................."
+  "...ZZZZZZZZZZ......."};
+static const uint16_t PAL_wx_partly_day_10[] = {0xFFB8,0xFCE3,0xADD9,0xD6FD,0xF7BF,0xFE87};
+static const Sprite SPR_wx_partly_day_10 = {10, 10, "hostwy", PAL_wx_partly_day_10,
+  "....o....."
+  ".o.....o.."
+  "...yyy...."
+  "..yhyyy..."
+  "o.yyyyy..."
+  "..yyyywww."
+  "...ywwwwt."
+  "..wwwwwwwt"
+  "..twwwwwtt"
+  "...ssssss."};
+static const uint16_t PAL_wx_partly_day_20[] = {0xFFB8,0xFCE3,0xADD9,0xD6FD,0xF7BF,0xFE87};
+static const Sprite SPR_wx_partly_day_20 = {20, 20, "hostwy", PAL_wx_partly_day_20,
+  "......oo............"
+  ".o....oo....o......."
+  "..o........o........"
+  ".....yyyy..........."
+  "....yyyyyy.........."
+  "...yyhhyyyy........."
+  "oo.yhyyyyyy.oo......"
+  "oo.yyyyyyyo.oo......"
+  "...yyyyyyyo........."
+  "....yyyyoo.........."
+  ".....oooo...wwww...."
+  "..o.......wwwwwwww.."
+  ".o.......wwwwwwwwwt."
+  "......ww.wwwwwwwwwwt"
+  ".....wwwwwwwwwwwwwwt"
+  ".....wwwwwwwwwwwwwwt"
+  ".....twwwwwwwwwwwwtt"
+  ".....tttttttttttttts"
+  "......sssssssssssss."
+  "...................."};
+static const uint16_t PAL_wx_partly_night_10[] = {0xFFFF,0xFF95,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_partly_night_10 = {10, 10, "kmstw", PAL_wx_partly_night_10,
+  "..mm......"
+  ".mm.....k."
+  ".mm......."
+  "mmm......."
+  "mmmm......"
+  ".mmmmwww.."
+  "..mwwwwwt."
+  "..wwwwwwwt"
+  "..twwwwwtt"
+  "...ssssss."};
+static const uint16_t PAL_wx_partly_night_20[] = {0xFFFF,0xFF95,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_partly_night_20 = {20, 20, "kmstw", PAL_wx_partly_night_20,
+  "...................."
+  "....mm.............."
+  "...mmm........k....."
+  "..mmm..............."
+  "..mmm..............."
+  ".mmmm..............."
+  ".mmmm..............."
+  ".mmmmm.............."
+  ".mmmmmm............."
+  "..mmmmmmm..........."
+  "..mmmmmmm...wwww...."
+  "...mmmmm..wwwwwwww.."
+  ".........wwwwwwwwwt."
+  "......ww.wwwwwwwwwwt"
+  ".....wwwwwwwwwwwwwwt"
+  ".....wwwwwwwwwwwwwwt"
+  ".....twwwwwwwwwwwwtt"
+  ".....tttttttttttttts"
+  "......sssssssssssss."
+  "...................."};
+static const uint16_t PAL_wx_rain_10[] = {0x3D1F,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_rain_10 = {10, 10, "bstw", PAL_wx_rain_10,
+  "....www..."
+  ".ww.wwwwt."
+  "wwwwwwwwwt"
+  "twwwwwwwtt"
+  ".ssssssss."
+  ".........."
+  "...b..b..b"
+  "..b..b..b."
+  ".b..b..b.."
+  ".........."};
+static const uint16_t PAL_wx_rain_20[] = {0x3D1F,0xADD9,0xD6FD,0xF7BF};
+static const Sprite SPR_wx_rain_20 = {20, 20, "bstw", PAL_wx_rain_20,
+  "...................."
+  ".........wwww......."
+  ".......wwwwwwww....."
+  "......wwwwwwwwww...."
+  "...ww.wwwwwwwwwwt..."
+  "..wwwwwwwwwwwwwwtt.."
+  ".wwwwwwwwwwwwwwwwtt."
+  ".wwwwwwwwwwwwwwwwwt."
+  ".twwwwwwwwwwwwwwwtt."
+  ".ttttttttttttttttts."
+  "..ssssssssssssssss.."
+  "...................."
+  "...................."
+  "......b...b...b....."
+  "......b...b...b....."
+  ".....b...b...b......"
+  "....b...b...b...b..."
+  "....b...b...b...b..."
+  "...b...b...b...b...."
+  "...................."};
+static const uint16_t PAL_wx_snow_10[] = {0xE7BF,0xADD9,0xD6FD,0xF7BF,0x7EFF};
+static const Sprite SPR_wx_snow_10 = {10, 10, "fstwx", PAL_wx_snow_10,
+  "....www..."
+  ".ww.wwwwt."
+  "wwwwwwwwwt"
+  "twwwwwwwtt"
+  ".ssssssss."
+  ".........."
+  "..x......."
+  ".xfx...x.."
+  "..x...xfx."
+  ".......x.."};
+static const uint16_t PAL_wx_snow_20[] = {0xE7BF,0xADD9,0xD6FD,0xF7BF,0x7EFF};
+static const Sprite SPR_wx_snow_20 = {20, 20, "fstwx", PAL_wx_snow_20,
+  "...................."
+  ".........wwww......."
+  ".......wwwwwwww....."
+  "......wwwwwwwwww...."
+  "...ww.wwwwwwwwwwt..."
+  "..wwwwwwwwwwwwwwtt.."
+  ".wwwwwwwwwwwwwwwwtt."
+  ".wwwwwwwwwwwwwwwwwt."
+  ".twwwwwwwwwwwwwwwtt."
+  ".ttttttttttttttttts."
+  "..ssssssssssssssss.."
+  "...................."
+  "...................."
+  ".....x.........x...."
+  "....xfx.......xfx..."
+  ".....x.........x...."
+  "..........x........."
+  ".........xfx........"
+  "..........x........."
+  "...................."};
+static const uint16_t PAL_wx_storm_10[] = {0x532F,0x6BD2,0x84B5,0xFCE3,0xFE87};
+static const Sprite SPR_wx_storm_10 = {10, 10, "Ddeoy", PAL_wx_storm_10,
+  "....eee..."
+  ".ee.eeeed."
+  "eeeeeeeeed"
+  "deeeeeeedd"
+  ".DDDD.yoD."
+  ".....yo..."
+  "....yyyo.."
+  ".....yo..."
+  "....yo...."
+  "....o....."};
+static const uint16_t PAL_wx_storm_20[] = {0x532F,0x6BD2,0x84B5,0xFCE3,0xFE87};
+static const Sprite SPR_wx_storm_20 = {20, 20, "Ddeoy", PAL_wx_storm_20,
+  "...................."
+  ".........eeee......."
+  ".......eeeeeeee....."
+  "......eeeeeeeeee...."
+  "...ee.eeeeeeeeeed..."
+  "..eeeeeeeeeeeeeedd.."
+  ".eeeeeeeeeeeeeeeedd."
+  ".eeeeeeeeeeeeeeeeed."
+  ".deeeeeeeeeeeeeeedd."
+  ".ddddddddd.....dddD."
+  "..DDDDDDD..yyo.DDD.."
+  "..........yyo......."
+  ".........yyo........"
+  "........yyyyyo......"
+  "..........yyo......."
+  ".........yyo........"
+  ".........yo........."
+  ".........o.........."
+  "...................."
+  "...................."};
+static const uint16_t PAL_wx_unknown_10[] = {0x6BF2,0x8CF6,0xFFFF};
+static const Sprite SPR_wx_unknown_10 = {10, 10, "Ggk", PAL_wx_unknown_10,
+  ".........."
+  "...gggg..."
+  "..ggkkkgg."
+  ".ggggggkgg"
+  "gggggkgggg"
+  "gggggggggg"
+  "gggggkgggG"
+  ".GGGGGGGG."
+  ".........."
+  ".........."};
+static const uint16_t PAL_wx_unknown_20[] = {0x6BF2,0x8CF6,0xFFFF};
+static const Sprite SPR_wx_unknown_20 = {20, 20, "Ggk", PAL_wx_unknown_20,
+  "...................."
+  "...................."
+  "...................."
+  "...................."
+  ".........gggg......."
+  ".......gggggggg....."
+  "......gggkkkgggg...."
+  "...gg.ggkkgkkgggg..."
+  "..gggggggggkkggggg.."
+  ".gggggggggkkggggggg."
+  ".gggggggggkgggggggg."
+  ".gggggggggggggggggg."
+  ".gggggggggkgggggggG."
+  "..GGGGGGGGGGGGGGGG.."
+  "...................."
+  "...................."
+  "...................."
+  "...................."
+  "...................."
+  "...................."};
+static const uint16_t PAL_cat_a_sleep[] = {0xF81F};
+static const Sprite SPR_cat_a_sleep = {1, 1, "a", PAL_cat_a_sleep, "a"};
+static const uint16_t PAL_cat_b_sleep[] = {0xF81F};
+static const Sprite SPR_cat_b_sleep = {1, 1, "a", PAL_cat_b_sleep, "a"};
+static const uint16_t PAL_sun_face[] = {0xF81F};
+static const Sprite SPR_sun_face = {1, 1, "a", PAL_sun_face, "a"};
+static const uint16_t PAL_moon_face[] = {0xF81F};
+static const Sprite SPR_moon_face = {1, 1, "a", PAL_moon_face, "a"};
+static const uint16_t PAL_snowman[] = {0xF81F};
+static const Sprite SPR_snowman = {1, 1, "a", PAL_snowman, "a"};
+static const uint16_t PAL_zzz[] = {0xF81F};
+static const Sprite SPR_zzz = {1, 1, "a", PAL_zzz, "a"};
+static const uint16_t PAL_sparkle[] = {0xF81F};
+static const Sprite SPR_sparkle = {1, 1, "a", PAL_sparkle, "a"};
+// <<< FACE ART
+// >>> FACE CODE
+// =========================
+// Clock faces: drawing
+// =========================
+// Shapes are first drawn into a 1-byte-per-pixel mask and then "flushed" with
+// a Paint (solid, gradient over a box, or rainbow), so any text, digit or
+// shape can use a gradient. Everything is clipped to the 64x64 buffer.
+static uint16_t faceFb[64 * 64];
+static uint8_t faceMk[64 * 64];
+static int mkX0 = 64, mkY0 = 64, mkX1 = -1, mkY1 = -1;
+
+#define FACE_DEG "\x01"
+#define FACE_COLON_OFF '\x02'
+
+static inline void fbSet(int x, int y, uint16_t c) {
+  if ((unsigned)x < 64u && (unsigned)y < 64u) faceFb[y * 64 + x] = c;
+}
+static void fbFill(uint16_t c) {
+  for (int i = 0; i < 64 * 64; i++) faceFb[i] = c;
+}
+static void fbRect(int x, int y, int w, int h, uint16_t c) {
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++) fbSet(x + i, y + j, c);
+}
+static void fbFrame(int x, int y, int w, int h, uint16_t c) {
+  fbRect(x, y, w, 1, c);
+  fbRect(x, y + h - 1, w, 1, c);
+  fbRect(x, y, 1, h, c);
+  fbRect(x + w - 1, y, 1, h, c);
+}
+
+static inline void mkSet(int x, int y) {
+  if ((unsigned)x >= 64u || (unsigned)y >= 64u) return;
+  faceMk[y * 64 + x] = 1;
+  if (x < mkX0) mkX0 = x;
+  if (x > mkX1) mkX1 = x;
+  if (y < mkY0) mkY0 = y;
+  if (y > mkY1) mkY1 = y;
+}
+static void mkRect(int x, int y, int w, int h) {
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++) mkSet(x + i, y + j);
+}
+
+// Same algorithms as Adafruit GFX, so the classic faces keep their exact look.
+static void mkLine(int x0, int y0, int x1, int y1) {
+  bool steep = abs(y1 - y0) > abs(x1 - x0);
+  int t;
+  if (steep) { t = x0; x0 = y0; y0 = t; t = x1; x1 = y1; y1 = t; }
+  if (x0 > x1) { t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; }
+  int dx = x1 - x0, dy = abs(y1 - y0), err = dx / 2, ystep = y0 < y1 ? 1 : -1;
+  for (; x0 <= x1; x0++) {
+    if (steep) mkSet(y0, x0); else mkSet(x0, y0);
+    err -= dy;
+    if (err < 0) { y0 += ystep; err += dx; }
+  }
+}
+static void mkCircle(int x0, int y0, int r) {
+  int f = 1 - r, ddx = 1, ddy = -2 * r, x = 0, y = r;
+  mkSet(x0, y0 + r); mkSet(x0, y0 - r); mkSet(x0 + r, y0); mkSet(x0 - r, y0);
+  while (x < y) {
+    if (f >= 0) { y--; ddy += 2; f += ddy; }
+    x++; ddx += 2; f += ddx;
+    mkSet(x0 + x, y0 + y); mkSet(x0 - x, y0 + y); mkSet(x0 + x, y0 - y); mkSet(x0 - x, y0 - y);
+    mkSet(x0 + y, y0 + x); mkSet(x0 - y, y0 + x); mkSet(x0 + y, y0 - x); mkSet(x0 - y, y0 - x);
+  }
+}
+static void mkVLine(int x, int y, int h) { mkRect(x, y, 1, h); }
+static void mkDisc(int x0, int y0, int r) {
+  mkVLine(x0, y0 - r, 2 * r + 1);
+  int f = 1 - r, ddx = 1, ddy = -2 * r, x = 0, y = r, px = x, py = y;
+  while (x < y) {
+    if (f >= 0) { y--; ddy += 2; f += ddy; }
+    x++; ddx += 2; f += ddx;
+    if (x < y + 1) { mkVLine(x0 + x, y0 - y, 2 * y + 1); mkVLine(x0 - x, y0 - y, 2 * y + 1); }
+    if (y != py) { mkVLine(x0 + py, y0 - px, 2 * px + 1); mkVLine(x0 - py, y0 - px, 2 * px + 1); py = y; }
+    px = x;
+  }
+}
+
+static inline void c565to888(uint16_t c, int& r, int& g, int& b) {
+  r = ((c >> 11) & 31) * 255 / 31;
+  g = ((c >> 5) & 63) * 255 / 63;
+  b = (c & 31) * 255 / 31;
+}
+static inline uint16_t rgb565(int r, int g, int b) {
+  if (r < 0) r = 0; if (r > 255) r = 255;
+  if (g < 0) g = 0; if (g > 255) g = 255;
+  if (b < 0) b = 0; if (b > 255) b = 255;
+  return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+static uint16_t lerp565(uint16_t a, uint16_t b, float t) {
+  int r1, g1, b1, r2, g2, b2;
+  c565to888(a, r1, g1, b1);
+  c565to888(b, r2, g2, b2);
+  return rgb565(r1 + (int)lroundf((r2 - r1) * t), g1 + (int)lroundf((g2 - g1) * t), b1 + (int)lroundf((b2 - b1) * t));
+}
+static uint16_t dim565(uint16_t c, float f) { return lerp565(0, c, f); }
+static uint16_t hsv565(float h, float s, float v) {
+  h = fmodf(h, 360.0f);
+  if (h < 0) h += 360.0f;
+  float c = v * s, x = c * (1 - fabsf(fmodf(h / 60.0f, 2.0f) - 1)), m = v - c, r, g, b;
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  return rgb565((int)((r + m) * 255), (int)((g + m) * 255), (int)((b + m) * 255));
+}
+
+// Color of paint p at (x,y) for a gradient spanning the box (bx,by,bw,bh).
+static uint16_t paintAt(const Paint& p, int x, int y, int bx, int by, int bw, int bh) {
+  if (p.dir == 0) return p.a;
+  float t = 0;
+  if (p.dir == 1) t = bh > 1 ? (float)(y - by) / (bh - 1) : 0;
+  else if (p.dir == 3) t = bw + bh > 2 ? (float)((x - bx) + (y - by)) / (bw + bh - 2) : 0;
+  else t = bw > 1 ? (float)(x - bx) / (bw - 1) : 0;
+  if (t < 0) t = 0;
+  if (t > 1) t = 1;
+  if (p.dir == 4) return hsv565(t * 300.0f, 1, 1);
+  return lerp565(p.a, p.b, t);
+}
+
+static void mkFlush(const Paint& p, int bx, int by, int bw, int bh) {
+  if (mkX1 >= mkX0) {
+    for (int y = mkY0; y <= mkY1; y++)
+      for (int x = mkX0; x <= mkX1; x++) {
+        int i = y * 64 + x;
+        if (!faceMk[i]) continue;
+        faceMk[i] = 0;
+        faceFb[i] = paintAt(p, x, y, bx, by, bw, bh);
+      }
+  }
+  mkX0 = 64; mkY0 = 64; mkX1 = -1; mkY1 = -1;
+}
+static Paint solid(uint16_t c) { Paint p = {c, c, 0}; return p; }
+
+// ---- text: font 0 = TomThumb 3x5, font 1 = classic 5x7 (GFX default) ----
+// y is the top of the capitals. "\x01" draws a degree ring, '\x02' is an
+// invisible colon (blinking colon in its "off" second).
+static int charAdv(char c, uint8_t font, uint8_t sc) {
+  if (c == '\x01') return 4 * sc;
+  return (font == 0 ? 4 : 6) * sc;
+}
+static int textW(const char* s, uint8_t font, uint8_t sc) {
+  int w = 0;
+  for (const char* c = s; *c; c++) w += charAdv(*c, font, sc);
+  return w > 0 ? w - sc : 0;
+}
+static int textH(uint8_t font, uint8_t sc) { return (font == 0 ? 5 : 7) * sc; }
+static void mkGlyphTom(char c, int x, int y, uint8_t sc) {
+  if (c < (char)TomThumb.first || c > (char)TomThumb.last) return;
+  const GFXglyph* g = &TomThumb.glyph[c - TomThumb.first];
+  const uint8_t* bm = TomThumb.bitmap;
+  uint16_t bo = g->bitmapOffset;
+  uint8_t bits = 0, bit = 0;
+  for (int yy = 0; yy < g->height; yy++)
+    for (int xx = 0; xx < g->width; xx++) {
+      if (!(bit++ & 7)) bits = bm[bo++];
+      if (bits & 0x80) mkRect(x + (g->xOffset + xx) * sc, y + (5 + g->yOffset + yy) * sc, sc, sc);
+      bits <<= 1;
+    }
+}
+static void mkGlyphClassic(unsigned char c, int x, int y, uint8_t sc) {
+  for (int i = 0; i < 5; i++) {
+    uint8_t line = font[c * 5 + i];
+    for (int j = 0; j < 8; j++, line >>= 1)
+      if (line & 1) mkRect(x + i * sc, y + j * sc, sc, sc);
+  }
+}
+static void mkDegree(int x, int y, uint8_t sc) {
+  static const uint8_t ring[3] = {7, 5, 7};
+  for (int j = 0; j < 3; j++)
+    for (int i = 0; i < 3; i++)
+      if (ring[j] & (4 >> i)) mkRect(x + i * sc, y + j * sc, sc, sc);
+}
+static void mkText(const char* s, int x, int y, uint8_t font, uint8_t sc) {
+  for (const char* c = s; *c; c++) {
+    if (*c == '\x01') mkDegree(x, y, sc);
+    else if (*c == FACE_COLON_OFF) {}
+    else if (font == 0) mkGlyphTom(*c, x, y, sc);
+    else mkGlyphClassic((unsigned char)*c, x, y, sc);
+    x += charAdv(*c, font, sc);
+  }
+}
+// align: 0 = x is the left edge, 1 = x is the center, 2 = x is the right edge.
+static int alignX(int x, int w, uint8_t align) { return align == 1 ? x - w / 2 : align == 2 ? x - w + 1 : x; }
+static void drawText(const char* s, int x, int y, uint8_t font, uint8_t sc, uint8_t align, const Paint& p) {
+  int w = textW(s, font, sc), x0 = alignX(x, w, align);
+  mkText(s, x0, y, font, sc);
+  mkFlush(p, x0, y, w, textH(font, sc));
+}
+
+// ---- 7-segment style digits ----
+// style 0 = LED segments with gaps, 1 = chunky joined blocks, 2 = thin lines.
+// bits: a=1 top, b=2 upper right, c=4 lower right, d=8 bottom, e=16 lower left, f=32 upper left, g=64 middle
+static uint8_t segBits(char c) {
+  switch (c) {
+    case '0': return 0x3F; case '1': return 0x06; case '2': return 0x5B; case '3': return 0x4F;
+    case '4': return 0x66; case '5': return 0x6D; case '6': return 0x7D; case '7': return 0x07;
+    case '8': return 0x7F; case '9': return 0x6F; case '-': return 0x40; case 'A': return 0x77;
+    case 'P': return 0x73; case 'C': return 0x39; case 'E': return 0x79; case 'F': return 0x71;
+    default: return 0;
+  }
+}
+static void mkSeg(int x, int y, int w, int h, int th, uint8_t style, uint8_t bits) {
+  if (style == 2) th = 1;
+  if (th < 1) th = 1;
+  int midY = y + (h - th) / 2;
+  if (style != 0) {
+    if (bits & 1) mkRect(x, y, w, th);
+    if (bits & 8) mkRect(x, y + h - th, w, th);
+    if (bits & 64) mkRect(x, midY, w, th);
+    if (bits & 32) mkRect(x, y, th, midY - y + th);
+    if (bits & 2) mkRect(x + w - th, y, th, midY - y + th);
+    if (bits & 16) mkRect(x, midY, th, y + h - midY);
+    if (bits & 4) mkRect(x + w - th, midY, th, y + h - midY);
     return;
   }
-  display.fillCircle(x - 3, y, 4, color);
-  display.fillCircle(x + 2, y - 2, 5, color);
-  display.fillRect(x - 7, y, 14, 4, color);
-  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82) || code >= 95) {
-    display.drawPixel(x - 4, y + 7, color);
-    display.drawPixel(x, y + 9, color);
-    display.drawPixel(x + 4, y + 7, color);
+  // LED look: every segment runs between the centers of its two corners and
+  // has pointed ends, leaving a 1 px diagonal gap where segments meet.
+  int c = (th - 1) / 2;
+  int xl = x + c, xr = x + w - 1 - c;                 // column centers
+  int yt = y + c, ym = midY + c, yb = y + h - 1 - c;  // lane centers
+  for (int k = 0; k < th; k++) {
+    int off = abs(2 * k - (th - 1)) / 2 + 1;
+    if (bits & 1) mkRect(xl + off, y + k, xr - xl - 2 * off + 1, 1);                 // a
+    if (bits & 64) mkRect(xl + off, midY + k, xr - xl - 2 * off + 1, 1);             // g
+    if (bits & 8) mkRect(xl + off, y + h - th + k, xr - xl - 2 * off + 1, 1);        // d
+    if (bits & 32) mkRect(x + k, yt + off, 1, ym - yt - 2 * off + 1);                // f
+    if (bits & 2) mkRect(x + w - th + k, yt + off, 1, ym - yt - 2 * off + 1);        // b
+    if (bits & 16) mkRect(x + k, ym + off, 1, yb - ym - 2 * off + 1);                // e
+    if (bits & 4) mkRect(x + w - th + k, ym + off, 1, yb - ym - 2 * off + 1);        // c
+  }
+}
+static void mkColon(int x, int y, int cw, int h, int th) {
+  int ds = th < 1 ? 1 : th;
+  if (ds > cw) ds = cw;
+  int dx = x + (cw - ds) / 2;
+  mkRect(dx, y + h / 3 - ds / 2, ds, ds);
+  mkRect(dx, y + (2 * h) / 3 - ds / 2, ds, ds);
+}
+static int segW(const char* s, int dw, int cw, int gap) {
+  int w = 0, n = 0;
+  for (const char* c = s; *c; c++, n++) w += (*c == ':' || *c == FACE_COLON_OFF) ? cw : dw;
+  return n ? w + gap * (n - 1) : 0;
+}
+// Draws digits; ghost (optional) paints the unlit segments first. The gradient
+// box is the text box unless bw > 0 (lets several rows share one gradient).
+static void segDraw(const char* s, int x, int y, int dw, int dh, int th, int gap, int cw, uint8_t style,
+                    uint8_t align, const Paint& on, const Paint* ghost, int bx, int by, int bw, int bh) {
+  int w = segW(s, dw, cw, gap), x0 = alignX(x, w, align);
+  if (bw <= 0) { bx = x0; by = y; bw = w; bh = dh; }
+  for (int pass = ghost ? 0 : 1; pass < 2; pass++) {
+    int cx = x0;
+    for (const char* c = s; *c; c++) {
+      if (*c == ':' || *c == FACE_COLON_OFF) {
+        bool lit = *c == ':';
+        if (lit == (pass == 1)) mkColon(cx, y, cw, dh, style == 2 ? 1 : th);
+        cx += cw + gap;
+        continue;
+      }
+      uint8_t b = segBits(*c);
+      mkSeg(cx, y, dw, dh, th, style, pass == 1 ? b : (uint8_t)(~b & 0x7F));
+      cx += dw + gap;
+    }
+    if (pass == 0) mkFlush(*ghost, bx, by, bw, bh);
+    else mkFlush(on, bx, by, bw, bh);
   }
 }
 
-String dateShort(struct tm& ti) {
-  const char* months[] = {"ENE","FEB","MAR","ABR","MAY","JUN","JUL","AGO","SEP","OCT","NOV","DIC"};
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%02d %s", ti.tm_mday, months[ti.tm_mon]);
-  return String(buf);
+// ---- sprites ----
+// Pixel art as strings: '.' is transparent, other chars index the palette.
+// recolorKey1/2 (0 = none) let faces change a sprite color (e.g. cat fur).
+static void drawSprite(const Sprite& s, int x, int y, char rk1, uint16_t rc1, char rk2, uint16_t rc2) {
+  for (int j = 0; j < s.h; j++)
+    for (int i = 0; i < s.w; i++) {
+      char c = s.px[j * s.w + i];
+      if (c == '.') continue;
+      uint16_t col;
+      if (rk1 && c == rk1) col = rc1;
+      else if (rk2 && c == rk2) col = rc2;
+      else {
+        const char* k = strchr(s.keys, c);
+        if (!k) continue;
+        col = s.pal[k - s.keys];
+      }
+      fbSet(x + i, y + j, col);
+    }
+}
+static void drawSpritePlain(const Sprite& s, int x, int y) { drawSprite(s, x, y, 0, 0, 0, 0); }
+
+// ---- weather icons ----
+static int wxKind(int code) {
+  if (code < 0) return 8;
+  if (code == 0) return 0;
+  if (code <= 2) return 1;
+  if (code == 3) return 2;
+  if (code == 45 || code == 48) return 3;
+  if (code >= 51 && code <= 57) return 4;
+  if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return 5;
+  if ((code >= 71 && code <= 77) || code == 85 || code == 86) return 6;
+  if (code >= 95) return 7;
+  return 8;
+}
+static const Sprite* wxSprite(int code, bool night, bool small) {
+  static const Sprite* const big[9] = {&SPR_wx_clear_day_20, &SPR_wx_partly_day_20, &SPR_wx_cloudy_20, &SPR_wx_fog_20,
+                                       &SPR_wx_drizzle_20, &SPR_wx_rain_20, &SPR_wx_snow_20, &SPR_wx_storm_20, &SPR_wx_unknown_20};
+  static const Sprite* const sm[9] = {&SPR_wx_clear_day_10, &SPR_wx_partly_day_10, &SPR_wx_cloudy_10, &SPR_wx_fog_10,
+                                      &SPR_wx_drizzle_10, &SPR_wx_rain_10, &SPR_wx_snow_10, &SPR_wx_storm_10, &SPR_wx_unknown_10};
+  int k = wxKind(code);
+  if (night && k == 0) return small ? &SPR_wx_clear_night_10 : &SPR_wx_clear_night_20;
+  if (night && k == 1) return small ? &SPR_wx_partly_night_10 : &SPR_wx_partly_night_20;
+  return small ? sm[k] : big[k];
+}
+// Icon for the current weather, centered in a size x size box at (x,y).
+static void drawWxNow(const FaceEnv& e, int x, int y, bool small) {
+  const Sprite* s = wxSprite(e.wxValid ? e.code : -1, e.night, small);
+  int box = small ? 10 : 20;
+  drawSpritePlain(*s, x + (box - s->w) / 2, y + (box - s->h) / 2);
+}
+static void drawWxDay(const WxDay& d, int x, int y, bool small) {
+  if (!d.valid) return;
+  const Sprite* s = wxSprite(d.code, false, small);
+  int box = small ? 10 : 20;
+  drawSpritePlain(*s, x + (box - s->w) / 2, y + (box - s->h) / 2);
 }
 
-void renderClock() {
-  if (!clockCfg.enabled) return;
-  struct tm ti;
-  if (!getLocalTime(&ti, 50)) return;
-
-  display.clearDisplay();
-  display.fillScreen(clockCfg.bg);
-
-  int hour = ti.tm_hour;
-  const char* suffix = "";
-  if (!clockCfg.hour24) {
-    suffix = hour >= 12 ? "P" : "A";
-    hour %= 12;
-    if (hour == 0) hour = 12;
+// Wi-Fi strength icon (9x7): arcs lit by signal, dim when disconnected.
+static void drawWifi(int x, int y, bool ok, int rssi, uint16_t c) {
+  static const char* const art =
+    "..aaaaa.."
+    ".a.....a."
+    "a.bbbbb.a"
+    "..b...b.."
+    "...ccc..."
+    "........."
+    "....d....";
+  int bars = !ok ? 0 : rssi > -60 ? 3 : rssi > -70 ? 2 : 1;
+  uint16_t dim = dim565(c, 0.22f);
+  for (int j = 0; j < 7; j++)
+    for (int i = 0; i < 9; i++) {
+      char k = art[j * 9 + i];
+      if (k == '.') continue;
+      bool lit = ok && (k == 'd' || (k == 'c' && bars >= 1) || (k == 'b' && bars >= 2) || (k == 'a' && bars >= 3));
+      fbSet(x + i, y + j, lit ? c : dim);
+    }
+  if (!ok) {
+    uint16_t red = rgb565(255, 70, 80);
+    for (int i = 0; i < 4; i++) { fbSet(x + 5 + i, y + 3 + i, red); fbSet(x + 8 - i, y + 3 + i, red); }
   }
+}
 
-  char timeBuf[12];
-  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", hour, ti.tm_min);
-  String timeText(timeBuf);
-
-  if (clockCfg.mode == 3 || clockCfg.mode == 4) {
-    int cx = clockCfg.mode == 4 ? 20 : 32;
-    int cy = clockCfg.mode == 4 ? 24 : 30;
-    int radius = clockCfg.mode == 4 ? 18 : 27;
-    display.drawCircle(cx, cy, radius, clockCfg.primary);
-    for (int i = 0; i < 12; i++) {
-      float a = (i / 12.0f) * 2.0f * PI - PI / 2.0f;
-      int px = cx + cosf(a) * (radius - 3);
-      int py = cy + sinf(a) * (radius - 3);
-      display.drawPixel(px, py, clockCfg.secondary);
+// ---- shapes with paints ----
+static void drawAnalog(int cx, int cy, int r, const struct tm& t, bool secs, uint16_t ringC, uint16_t tickC,
+                       uint16_t hourC, uint16_t minC, uint16_t secC, uint16_t centerC) {
+  mkCircle(cx, cy, r);
+  mkFlush(solid(ringC), 0, 0, 64, 64);
+  for (int i = 0; i < 12; i++) {
+    float a = (i / 12.0f) * 2.0f * (float)M_PI - (float)M_PI / 2.0f;
+    fbSet((int)(cx + cosf(a) * (r - 3)), (int)(cy + sinf(a) * (r - 3)), tickC);
+  }
+  float ma = (t.tm_min / 60.0f) * 2.0f * (float)M_PI - (float)M_PI / 2.0f;
+  float ha = ((t.tm_hour % 12 + t.tm_min / 60.0f) / 12.0f) * 2.0f * (float)M_PI - (float)M_PI / 2.0f;
+  mkLine(cx, cy, (int)(cx + cosf(ha) * r * 0.50f), (int)(cy + sinf(ha) * r * 0.50f));
+  mkFlush(solid(hourC), 0, 0, 64, 64);
+  mkLine(cx, cy, (int)(cx + cosf(ma) * r * 0.76f), (int)(cy + sinf(ma) * r * 0.76f));
+  mkFlush(solid(minC), 0, 0, 64, 64);
+  if (secs) {
+    float sa = (t.tm_sec / 60.0f) * 2.0f * (float)M_PI - (float)M_PI / 2.0f;
+    mkLine(cx, cy, (int)(cx + cosf(sa) * r * 0.82f), (int)(cy + sinf(sa) * r * 0.82f));
+    mkFlush(solid(secC), 0, 0, 64, 64);
+  }
+  mkDisc(cx, cy, 1);
+  mkFlush(solid(centerC), 0, 0, 64, 64);
+}
+// Frame around the screen; a rainbow paint turns into a continuous ring.
+static void drawBorder(int th, const Paint& p) {
+  for (int y = 0; y < 64; y++)
+    for (int x = 0; x < 64; x++) {
+      int d = x < y ? x : y;
+      if (63 - x < d) d = 63 - x;
+      if (63 - y < d) d = 63 - y;
+      if (d >= th) continue;
+      uint16_t c;
+      if (p.dir == 4) {
+        float ang = atan2f(y - 31.5f, x - 31.5f);
+        c = hsv565((ang + (float)M_PI) * 180.0f / (float)M_PI + 135.0f, 1, 1);
+      } else {
+        c = paintAt(p, x, y, 0, 0, 64, 64);
+      }
+      faceFb[y * 64 + x] = c;
     }
-    float minuteAngle = (ti.tm_min / 60.0f) * 2.0f * PI - PI / 2.0f;
-    float hourAngle = ((ti.tm_hour % 12 + ti.tm_min / 60.0f) / 12.0f) * 2.0f * PI - PI / 2.0f;
-    display.drawLine(cx, cy, cx + cosf(hourAngle) * radius * 0.50f, cy + sinf(hourAngle) * radius * 0.50f, clockCfg.primary);
-    display.drawLine(cx, cy, cx + cosf(minuteAngle) * radius * 0.76f, cy + sinf(minuteAngle) * radius * 0.76f, clockCfg.accent);
-    if (clockCfg.showSeconds) {
-      float secAngle = (ti.tm_sec / 60.0f) * 2.0f * PI - PI / 2.0f;
-      display.drawLine(cx, cy, cx + cosf(secAngle) * radius * 0.82f, cy + sinf(secAngle) * radius * 0.82f, clockCfg.secondary);
-    }
-    display.fillCircle(cx, cy, 1, clockCfg.accent);
+}
 
-    if (clockCfg.mode == 3) {
-      if (clockCfg.showDate) drawCenteredText(dateShort(ti), 57, 1, clockCfg.secondary);
+// ---- dates and numbers ----
+static const char* const DOW3[2][7] = {{"DOM", "LUN", "MAR", "MIE", "JUE", "VIE", "SAB"},
+                                       {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"}};
+static const char* const DOW2[2][7] = {{"DO", "LU", "MA", "MI", "JU", "VI", "SA"},
+                                       {"SU", "MO", "TU", "WE", "TH", "FR", "SA"}};
+static const char* const DOWC[2][7] = {{"Dom", "Lun", "Mar", "Mie", "Jue", "Vie", "Sab"},
+                                       {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}};
+static const char* const DAYF[2][7] = {{"DOMINGO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO"},
+                                       {"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"}};
+static const char* const MON3[2][12] = {{"ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"},
+                                        {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"}};
+static int faceLang(const FaceSettings& s) { return s.lang == 1 ? 1 : 0; }
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static int wday(const FaceEnv& e, int plusDays) { return (clampi(e.t.tm_wday, 0, 6) + plusDays) % 7; }
+static int hourShown(const FaceSettings& s, const FaceEnv& e) {
+  int h = clampi(e.t.tm_hour, 0, 23);
+  if (s.h24) return h;
+  h %= 12;
+  return h ? h : 12;
+}
+static bool colonOn(const FaceSettings& s, const FaceEnv& e) { return !s.blink || (e.t.tm_sec % 2) == 0; }
+// "HH:MM" (or with the invisible colon on odd seconds when blinking).
+static void fmtTime(char* out, size_t n, const FaceSettings& s, const FaceEnv& e) {
+  if (!e.timeValid) { snprintf(out, n, "--:--"); return; }
+  snprintf(out, n, "%02d%c%02d", hourShown(s, e), colonOn(s, e) ? ':' : FACE_COLON_OFF, clampi(e.t.tm_min, 0, 59));
+}
+static void fmtHH(char* out, size_t n, const FaceSettings& s, const FaceEnv& e) {
+  if (!e.timeValid) snprintf(out, n, "--"); else snprintf(out, n, "%02d", hourShown(s, e));
+}
+static void fmtMM(char* out, size_t n, const FaceEnv& e) {
+  if (!e.timeValid) snprintf(out, n, "--"); else snprintf(out, n, "%02d", clampi(e.t.tm_min, 0, 59));
+}
+static void fmtDeg(char* out, size_t n, bool valid, float v, bool deg) {
+  if (!valid) snprintf(out, n, "--");
+  else snprintf(out, n, deg ? "%ld" FACE_DEG : "%ld", lroundf(v));
+}
+static const char* wxShort(int code, int lang) {
+  static const char* const es[] = {"SOL", "NUB", "NIE", "LLU", "NVE", "TOR", "CLM"};
+  static const char* const en[] = {"SUN", "CLD", "FOG", "RAIN", "SNOW", "STRM", "---"};
+  int k = code == 0 ? 0 : code <= 3 ? 1 : (code == 45 || code == 48) ? 2
+        : ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) ? 3 : (code >= 71 && code <= 77) ? 4 : code >= 95 ? 5 : 6;
+  return lang == 1 ? en[k] : es[k];
+}
+
+// =========================
+// Clock faces
+// =========================
+// Classic faces: the five designs the clock had before, pixel for pixel.
+// Slots: p0 bg, p1 primary, p2 secondary, p3 accent, p4 weather;
+// o0 seconds, o1 date, o2 temperature, o3 humidity, o4 weather.
+static void legacyText(const char* s, int y, uint8_t sc, uint16_t c) {
+  int x = (64 - (int)strlen(s) * 6 * sc) / 2;
+  if (x < 0) x = 0;
+  drawText(s, x, y, 1, sc, 0, solid(c));
+}
+static void faceClassic(const FaceSettings& s, const FaceEnv& e, int mode) {
+  uint16_t pri = s.p[1].a, sec = s.p[2].a, acc = s.p[3].a, wxc = s.p[4].a;
+  bool showSec = s.o[0], showDate = s.o[1], showTemp = s.o[2], showHum = s.o[3], showWx = s.o[4];
+  fbFill(s.p[0].a);
+  char tm[8], date[16], buf[16];
+  fmtTime(tm, sizeof tm, s, e);
+  const char* suffix = (!s.h24 && e.timeValid) ? (e.t.tm_hour >= 12 ? "P" : "A") : "";
+  if (e.timeValid) snprintf(date, sizeof date, "%02d %s", e.t.tm_mday, MON3[faceLang(s)][clampi(e.t.tm_mon, 0, 11)]);
+  else snprintf(date, sizeof date, "-- ---");
+
+  if (mode == 3 || mode == 4) {
+    int cx = mode == 4 ? 20 : 32, cy = mode == 4 ? 24 : 30, r = mode == 4 ? 18 : 27;
+    if (e.timeValid) drawAnalog(cx, cy, r, e.t, showSec, pri, sec, pri, acc, sec, acc);
+    if (mode == 3) {
+      if (showDate) legacyText(date, 57, 1, sec);
+      return;
+    }
+    drawText(tm, 63, 8, 1, 1, 2, solid(pri));
+    if (*suffix) drawText(suffix, 57, 16, 1, 1, 0, solid(pri));
+    if (e.wxValid) {
+      if (showTemp) { snprintf(buf, sizeof buf, "%ldC", lroundf(e.temp)); drawText(buf, 39, 25, 1, 1, 0, solid(wxc)); }
+      if (showHum) { snprintf(buf, sizeof buf, "%ld%%", lroundf(e.hum)); drawText(buf, 39, 35, 1, 1, 0, solid(wxc)); }
+      if (showWx) drawText(wxShort(e.code, faceLang(s)), 39, 45, 1, 1, 0, solid(acc));
+    }
+    if (showDate) drawText(date, 63, 56, 1, 1, 2, solid(sec));
+    return;
+  }
+  int timeY = (mode == 0 && !showDate) ? 20 : 8;
+  legacyText(tm, timeY, 2, pri);
+  if (*suffix) drawText(suffix, 56, timeY + 14, 1, 1, 0, solid(sec));
+  int y = timeY + 19;
+  if (showSec) {
+    if (e.timeValid) snprintf(buf, sizeof buf, ":%02d", clampi(e.t.tm_sec, 0, 59)); else snprintf(buf, sizeof buf, ":--");
+    legacyText(buf, y, 1, sec);
+    y += 10;
+  }
+  if (showDate) { legacyText(date, y, 1, sec); y += 10; }
+  if (mode == 2 && e.wxValid) {
+    int wx = 2;
+    if (showTemp) { snprintf(buf, sizeof buf, "%ldC", lroundf(e.temp)); drawText(buf, wx, 53, 1, 1, 0, solid(wxc)); wx += 23; }
+    if (showHum) { snprintf(buf, sizeof buf, "%ld%%", lroundf(e.hum)); drawText(buf, wx, 53, 1, 1, 0, solid(wxc)); }
+    if (showWx) drawWxNow(e, 50, 48, true);
+  }
+}
+static void faceClassicDigital(const FaceSettings& s, const FaceEnv& e) { faceClassic(s, e, 0); }
+static void faceClassicFecha(const FaceSettings& s, const FaceEnv& e) { faceClassic(s, e, 1); }
+static void faceClassicClima(const FaceSettings& s, const FaceEnv& e) { faceClassic(s, e, 2); }
+static void faceClassicAnalog(const FaceSettings& s, const FaceEnv& e) { faceClassic(s, e, 3); }
+static void faceClassicHibrido(const FaceSettings& s, const FaceEnv& e) { faceClassic(s, e, 4); }
+
+// Minimal apilado: hours over minutes. p0 digits, p1 date, p2 bg; o0 date, o1 style.
+static void faceMinimal(const FaceSettings& s, const FaceEnv& e) {
+  fbFill(s.p[2].a);
+  bool showDate = s.o[0];
+  uint8_t style = s.o[1] > 2 ? 0 : s.o[1];
+  char hh[4], mm[4];
+  fmtHH(hh, sizeof hh, s, e);
+  fmtMM(mm, sizeof mm, e);
+  int dw = showDate ? 16 : 18, dh = showDate ? 24 : 27, gap = 4, th = style == 2 ? 1 : style == 0 ? 4 : 3;
+  int y1 = 3, y2 = showDate ? 30 : 34;
+  int w = 2 * dw + gap;
+  segDraw(hh, 32, y1, dw, dh, th, gap, 4, style, 1, s.p[0], nullptr, 32 - w / 2, y1, w, y2 + dh - y1);
+  segDraw(mm, 32, y2, dw, dh, th, gap, 4, style, 1, s.p[0], nullptr, 32 - w / 2, y1, w, y2 + dh - y1);
+  if (showDate) {
+    char d[16];
+    if (e.timeValid) snprintf(d, sizeof d, "%s %d", MON3[faceLang(s)][clampi(e.t.tm_mon, 0, 11)], e.t.tm_mday);
+    else snprintf(d, sizeof d, "--- --");
+    drawText(d, 32, 58, 0, 1, 1, s.p[1]);
+  }
+}
+
+// Marco arcoiris: stacked digits in a gradient frame. p0 digits, p1 frame, p2 bg; o0 frame px, o1 style.
+static void faceRainbowFrame(const FaceSettings& s, const FaceEnv& e) {
+  fbFill(s.p[2].a);
+  drawBorder(clampi(s.o[0], 1, 3), s.p[1]);
+  uint8_t style = s.o[1] > 2 ? 1 : s.o[1];
+  char hh[4], mm[4];
+  fmtHH(hh, sizeof hh, s, e);
+  fmtMM(mm, sizeof mm, e);
+  int th = style == 2 ? 1 : style == 1 ? 4 : 3;
+  segDraw(hh, 32, 8, 15, 22, th, 4, 4, style, 1, s.p[0], nullptr, 15, 8, 34, 49);
+  segDraw(mm, 32, 35, 15, 22, th, 4, 4, style, 1, s.p[0], nullptr, 15, 8, 34, 49);
+}
+
+// Segmentos XL: huge LED digits with ghost segments.
+// p0 lit segments, p1 ghost, p2 texts, p3 bg, p4 temperature; o0 wifi icon, o1 ghost.
+static void faceSegXL(const FaceSettings& s, const FaceEnv& e) {
+  fbFill(s.p[3].a);
+  int L = faceLang(s);
+  char l2[16], tm[8], t[12];
+  if (e.timeValid) {
+    drawText(DAYF[L][wday(e, 0)], 1, 1, 0, 1, 0, s.p[2]);
+    snprintf(l2, sizeof l2, "%s %d", MON3[L][clampi(e.t.tm_mon, 0, 11)], e.t.tm_mday);
+    drawText(l2, 1, 8, 0, 1, 0, s.p[2]);
+  }
+  if (s.o[0]) drawWifi(54, 1, e.wifi, e.rssi, s.p[2].a);
+  fmtTime(tm, sizeof tm, s, e);
+  Paint ghost = s.p[1];
+  segDraw(tm, 32, 17, 11, 24, 3, 3, 4, 0, 1, s.p[0], s.o[1] ? &ghost : nullptr, 0, 0, 0, 0);
+  if (!s.h24 && e.timeValid) drawText(e.t.tm_hour >= 12 ? "P" : "A", 2, 49, 1, 1, 0, s.p[2]);
+  drawWxNow(e, 27, 46, true);
+  fmtDeg(t, sizeof t, e.wxValid, e.temp, true);
+  drawText(t, 62, 49, 1, 1, 2, s.p[4]);
+}
+
+// Clima 4 dias. p0 date, p1 time, p2 weekday, p3 temperature, p4 max, p5 min,
+// p6 humidity, p7 lines, p8 bg, p9 forecast weekdays; o0 per-day data (0 max/min, 1 max/humidity).
+static void faceWeather4(const FaceSettings& s, const FaceEnv& e) {
+  fbFill(s.p[8].a);
+  int L = faceLang(s);
+  char a[16], b[16], c[16], h[16];
+  if (e.timeValid) snprintf(a, sizeof a, "%02d-%02d", e.t.tm_mday, clampi(e.t.tm_mon, 0, 11) + 1);
+  else snprintf(a, sizeof a, "--/--");
+  drawText(a, 1, 1, 0, 1, 0, s.p[0]);
+  fmtTime(b, sizeof b, s, e);
+  drawText(b, 32, 1, 0, 1, 1, s.p[1]);
+  if (e.timeValid) drawText(DOW3[L][wday(e, 0)], 62, 1, 0, 1, 2, s.p[2]);
+  fbRect(0, 7, 64, 1, s.p[7].a);
+
+  drawWxNow(e, 1, 9, false);
+  fmtDeg(a, sizeof a, e.wxValid, e.temp, true);
+  uint8_t sc = textW(a, 1, 2) > 41 ? 1 : 2;
+  drawText(a, 23 + (41 - textW(a, 1, sc)) / 2, sc == 2 ? 9 : 12, 1, sc, 0, s.p[3]);
+
+  // max|min + humidity, shrinking if it does not fit in the 41 px column
+  const WxDay& t0 = e.d[0];
+  bool deg = true, hum = true;
+  for (int tries = 0; tries < 3; tries++) {
+    fmtDeg(a, sizeof a, t0.valid, t0.tmax, deg);
+    fmtDeg(c, sizeof c, t0.valid, t0.tmin, deg);
+    if (e.wxValid) snprintf(h, sizeof h, "%ld%%", lroundf(e.hum)); else snprintf(h, sizeof h, "--%%");
+    int w = textW(a, 0, 1) + 1 + 3 + 1 + textW(c, 0, 1) + (hum ? 3 + textW(h, 0, 1) : 0);
+    if (w <= 41) {
+      int x = 23 + (41 - w) / 2;
+      drawText(a, x, 24, 0, 1, 0, s.p[4]); x += textW(a, 0, 1) + 1;
+      drawText("|", x, 24, 0, 1, 0, s.p[7]); x += 4;
+      drawText(c, x, 24, 0, 1, 0, s.p[5]); x += textW(c, 0, 1) + 3;
+      if (hum) drawText(h, x, 24, 0, 1, 0, s.p[6]);
+      break;
+    }
+    if (deg) deg = false; else hum = false;
+  }
+  fbRect(0, 31, 64, 1, s.p[7].a);
+
+  for (int i = 0; i < 4; i++) {
+    int cx = 8 + i * 16;
+    const WxDay& d = e.d[i];
+    if (e.timeValid) drawText(DOW2[L][wday(e, i)], cx, 34, 0, 1, 1, s.p[9]);
+    drawWxDay(d, cx - 5, 40, true);
+    fmtDeg(a, sizeof a, d.valid, d.tmax, true);
+    drawText(a, cx, 51, 0, 1, 1, s.p[4]);
+    if (s.o[0] == 1) {
+      if (d.valid) snprintf(b, sizeof b, "%ld%%", lroundf(d.hum)); else snprintf(b, sizeof b, "--");
+      drawText(b, cx, 57, 0, 1, 1, s.p[6]);
     } else {
-      display.setTextSize(1);
-      display.setTextColor(clockCfg.primary);
-      display.setCursor(40, 8);
-      display.print(timeText);
-      if (!clockCfg.hour24) { display.setCursor(57, 16); display.print(suffix); }
-      if (clockCfg.showTemp && weatherValid) {
-        display.setTextColor(clockCfg.weatherColor);
-        display.setCursor(39, 25);
-        display.printf("%dC", (int)roundf(weatherTempC));
-      }
-      if (clockCfg.showHumidity && weatherValid) {
-        display.setCursor(39, 35);
-        display.printf("%d%%", (int)roundf(weatherHumidityPct));
-      }
-      if (clockCfg.showWeather && weatherValid) {
-        display.setTextColor(clockCfg.accent);
-        display.setCursor(39, 45);
-        display.print(weatherShort(weatherCode));
-      }
-      if (clockCfg.showDate) {
-        display.setTextColor(clockCfg.secondary);
-        display.setCursor(35, 56);
-        display.print(dateShort(ti));
-      }
-    }
-  } else {
-    int timeY = (clockCfg.mode == 0 && !clockCfg.showDate) ? 20 : 8;
-    drawCenteredText(timeText, timeY, 2, clockCfg.primary);
-    if (!clockCfg.hour24) {
-      display.setTextSize(1);
-      display.setTextColor(clockCfg.secondary);
-      display.setCursor(56, timeY + 14);
-      display.print(suffix);
-    }
-    int y = timeY + 19;
-    if (clockCfg.showSeconds) {
-      char secBuf[8]; snprintf(secBuf, sizeof(secBuf), ":%02d", ti.tm_sec);
-      drawCenteredText(String(secBuf), y, 1, clockCfg.secondary);
-      y += 10;
-    }
-    if ((clockCfg.mode == 1 || clockCfg.mode == 2 || clockCfg.showDate) && clockCfg.showDate) {
-      drawCenteredText(dateShort(ti), y, 1, clockCfg.secondary);
-      y += 10;
-    }
-    if (clockCfg.mode == 2 && weatherValid) {
-      display.setTextSize(1);
-      display.setTextColor(clockCfg.weatherColor);
-      int wx = 2;
-      if (clockCfg.showTemp) { display.setCursor(wx, 53); display.printf("%dC", (int)roundf(weatherTempC)); wx += 23; }
-      if (clockCfg.showHumidity) { display.setCursor(wx, 53); display.printf("%d%%", (int)roundf(weatherHumidityPct)); }
-      if (clockCfg.showWeather) drawWeatherIcon(55, 53, weatherCode, clockCfg.accent);
+      fmtDeg(b, sizeof b, d.valid, d.tmin, true);
+      drawText(b, cx, 57, 0, 1, 1, s.p[5]);
     }
   }
-
-  display.showBuffer();
 }
 
-void serviceClock() {
-  if (!clockCfg.enabled) return;
-  uint32_t interval = clockCfg.showSeconds ? 200UL : 1000UL;
-  if (millis() - lastClockDraw < interval) return;
-  lastClockDraw = millis();
-  renderClock();
+// Shared bottom panel of the mascot faces: character box on the left, time
+// and weekday boxes on the right.
+static void mascotPanel(const FaceSettings& s, const FaceEnv& e, uint16_t panelBg, uint16_t frame,
+                        const Paint& timeP, const Paint& dayP, const Sprite* buddy) {
+  fbRect(0, 37, 64, 27, panelBg);
+  fbFrame(0, 37, 64, 27, frame);
+  fbRect(27, 37, 1, 27, frame);
+  fbRect(27, 50, 37, 1, frame);
+  if (buddy) drawSpritePlain(*buddy, 1 + (26 - buddy->w) / 2, 38 + (25 - buddy->h) / 2);
+  char tm[8], d[8];
+  fmtTime(tm, sizeof tm, s, e);
+  segDraw(tm, 45, 39, 6, 10, 1, 1, 3, 2, 1, timeP, nullptr, 0, 0, 0, 0);
+  if (e.timeValid) snprintf(d, sizeof d, "%s.", DOWC[faceLang(s)][wday(e, 0)]); else snprintf(d, sizeof d, "---");
+  drawText(d, 45, 53, 1, 1, 1, dayP);
+}
+static void drawCats(bool sleeping, uint16_t furA, uint16_t furB) {
+  const Sprite& a = sleeping ? SPR_cat_a_sleep : SPR_cat_a;
+  const Sprite& b = sleeping ? SPR_cat_b_sleep : SPR_cat_b;
+  bool ra = furA != SPR_cat_a.pal[0], rb = furB != SPR_cat_b.pal[0];
+  drawSprite(a, 3, 34 - a.h, ra ? 'a' : 0, furA, ra ? 'b' : 0, dim565(furA, 0.8f));
+  drawSprite(b, 35, 34 - b.h, rb ? 'a' : 0, furB, rb ? 'b' : 0, dim565(furB, 0.8f));
+}
+static void drawStars(uint16_t c, bool many) {
+  static const uint8_t pts[][2] = {{1, 2}, {30, 3}, {61, 5}, {31, 16}, {2, 20}, {62, 22}, {29, 27}, {16, 1}, {47, 1}};
+  int n = many ? 9 : 5;
+  for (int i = 0; i < n; i++) fbSet(pts[i][0], pts[i][1], c);
 }
 
-void stopClock() {
-  clockCfg.enabled = false;
+// Mascotas (day): p0 sky, p1 night sky, p2 ground, p3 frame, p4 time, p5 weekday,
+// p6 fur cat A, p7 fur cat B, p8 panel bg; o0 night version after sunset, o1 sparkles.
+static void faceMascotsDay(const FaceSettings& s, const FaceEnv& e) {
+  bool night = s.o[0] && e.night;
+  fbFill(0);
+  mkRect(0, 0, 64, 34);
+  mkFlush(night ? s.p[1] : s.p[0], 0, 0, 64, 34);
+  if (night) drawStars(rgb565(255, 241, 168), false);
+  else if (s.o[1]) drawSpritePlain(SPR_sparkle, 29, 8);
+  fbRect(0, 34, 64, 3, s.p[2].a);
+  fbRect(0, 34, 64, 1, lerp565(s.p[2].a, 0xFFFF, 0.35f));
+  drawCats(false, s.p[6].a, s.p[7].a);
+  mascotPanel(s, e, s.p[8].a, s.p[3].a, s.p[4], s.p[5], night ? &SPR_moon_face : &SPR_sun_face);
 }
+
+// Mascotas de noche: p0 sky, p1 ground, p2 frame, p3 time, p4 weekday, p5 fur A,
+// p6 fur B, p7 stars, p8 panel bg; o0 buddy (0 snowman, 1 moon).
+static void faceMascotsNight(const FaceSettings& s, const FaceEnv& e) {
+  fbFill(0);
+  mkRect(0, 0, 64, 34);
+  mkFlush(s.p[0], 0, 0, 64, 34);
+  drawStars(s.p[7].a, true);
+  fbRect(0, 34, 64, 3, s.p[1].a);
+  fbRect(0, 34, 64, 1, lerp565(s.p[1].a, 0xFFFF, 0.25f));
+  drawCats(true, s.p[5].a, s.p[6].a);
+  drawSpritePlain(SPR_zzz, 22, 2);
+  drawSpritePlain(SPR_zzz, 54, 4);
+  mascotPanel(s, e, s.p[8].a, s.p[2].a, s.p[3], s.p[4], s.o[0] == 1 ? &SPR_moon_face : &SPR_snowman);
+}
+
+// Tablero: big time, date band, three user pictures, year / weather / month.
+// p0 bg, p1 digits, p2 band, p3 band text, p4 frames, p5 bottom text, p6 bottom boxes.
+static void faceDashboard(const FaceSettings& s, const FaceEnv& e) {
+  fbFill(s.p[0].a);
+  char tm[8], a[16];
+  fmtTime(tm, sizeof tm, s, e);
+  segDraw(tm, 32, 1, 12, 20, 3, 2, 4, 1, 1, s.p[1], nullptr, 0, 0, 0, 0);
+  fbRect(0, 23, 64, 8, s.p[2].a);
+  int L = faceLang(s);
+  if (e.timeValid) {
+    snprintf(a, sizeof a, "%02d", e.t.tm_mday);
+    drawText(a, 2, 25, 0, 1, 0, s.p[3]);
+    drawText(DOW3[L][wday(e, 0)], 61, 25, 0, 1, 2, s.p[3]);
+  }
+  for (int i = 0; i < 3; i++) {
+    int x = 1 + i * 21;
+    fbFrame(x, 32, 20, 20, s.p[4].a);
+    if (e.slot[i]) {
+      for (int j = 0; j < 18; j++)
+        for (int k = 0; k < 18; k++) fbSet(x + 1 + k, 33 + j, e.slot[i][j * 18 + k]);
+    } else {
+      fbRect(x + 1, 33, 18, 18, dim565(s.p[4].a, 0.18f));
+      fbRect(x + 9, 38, 2, 8, dim565(s.p[4].a, 0.6f));
+      fbRect(x + 6, 41, 8, 2, dim565(s.p[4].a, 0.6f));
+    }
+  }
+  fbRect(1, 53, 20, 10, s.p[6].a);
+  fbRect(43, 53, 20, 10, s.p[6].a);
+  if (e.timeValid) {
+    snprintf(a, sizeof a, "%d", e.t.tm_year + 1900);
+    drawText(a, 11, 56, 0, 1, 1, s.p[5]);
+    drawText(MON3[L][clampi(e.t.tm_mon, 0, 11)], 53, 56, 0, 1, 1, s.p[5]);
+  }
+  drawWxNow(e, 27, 53, true);
+}
+
+typedef void (*FaceFn)(const FaceSettings&, const FaceEnv&);
+struct FaceDef { const char* id; FaceFn fn; };
+static const FaceDef FACES[] = {
+  {"clasico-digital", faceClassicDigital},
+  {"clasico-fecha", faceClassicFecha},
+  {"clasico-clima", faceClassicClima},
+  {"clasico-analogico", faceClassicAnalog},
+  {"clasico-hibrido", faceClassicHibrido},
+  {"minimal-apilado", faceMinimal},
+  {"marco-arcoiris", faceRainbowFrame},
+  {"segmentos-xl", faceSegXL},
+  {"clima-4dias", faceWeather4},
+  {"mascotas-dia", faceMascotsDay},
+  {"mascotas-noche", faceMascotsNight},
+  {"tablero", faceDashboard},
+};
+static const int FACE_COUNT = sizeof(FACES) / sizeof(FACES[0]);
+static bool faceExists(const char* id) {
+  for (int i = 0; i < FACE_COUNT; i++)
+    if (strcmp(FACES[i].id, id) == 0) return true;
+  return false;
+}
+// Renders a face into faceFb (unknown ids fall back to the first classic face).
+static void renderFace(const FaceSettings& s, const FaceEnv& e) {
+  mkX0 = 64; mkY0 = 64; mkX1 = -1; mkY1 = -1;
+  memset(faceMk, 0, sizeof faceMk);
+  fbFill(0);
+  for (int i = 0; i < FACE_COUNT; i++)
+    if (strcmp(FACES[i].id, s.face) == 0) { FACES[i].fn(s, e); return; }
+  FACES[0].fn(s, e);
+}
+// <<< FACE CODE
 
 // =========================
 // Persisted display state
@@ -1388,28 +2765,260 @@ void restoreState(){
       Log.println("Estado restaurado: animacion " + p); return;
     }
   } else if (kind == "clock") {
-    clockCfg.mode = constrain((int)jsonNumber(j, "cMode", 0), 0, 4);
-    clockCfg.hour24 = jsonNumber(j, "cH24", 1) != 0;
-    clockCfg.showSeconds = jsonNumber(j, "cSeconds", 0) != 0;
-    clockCfg.showDate = jsonNumber(j, "cDate", 1) != 0;
-    clockCfg.showTemp = jsonNumber(j, "cTemp", 1) != 0;
-    clockCfg.showHumidity = jsonNumber(j, "cHumidity", 1) != 0;
-    clockCfg.showWeather = jsonNumber(j, "cWeather", 1) != 0;
-    clockCfg.bg = (uint16_t)jsonNumber(j, "cBg", clockCfg.bg);
-    clockCfg.primary = (uint16_t)jsonNumber(j, "cPrimary", clockCfg.primary);
-    clockCfg.secondary = (uint16_t)jsonNumber(j, "cSecondary", clockCfg.secondary);
-    clockCfg.accent = (uint16_t)jsonNumber(j, "cAccent", clockCfg.accent);
-    clockCfg.weatherColor = (uint16_t)jsonNumber(j, "cWeatherColor", clockCfg.weatherColor);
+    FaceSettings s;
+    if (loadClockCfg(s)) {
+      faceCfg = s;
+    } else {
+      // Saved by an older firmware: turn the old clock mode into its classic face.
+      faceDefaults(s);
+      int mode = constrain((int)jsonNumber(j, "cMode", 0), 0, 4);
+      strncpy(s.face, LEGACY_FACES[mode], sizeof(s.face) - 1);
+      s.h24 = jsonNumber(j, "cH24", 1) != 0;
+      const uint16_t c[5] = {(uint16_t)jsonNumber(j, "cBg", 0), (uint16_t)jsonNumber(j, "cPrimary", 0xFFFF),
+                             (uint16_t)jsonNumber(j, "cSecondary", 0x269D), (uint16_t)jsonNumber(j, "cAccent", 0xFB46),
+                             (uint16_t)jsonNumber(j, "cWeatherColor", 0x7E9F)};
+      for (int i = 0; i < 5; i++) s.p[i] = {c[i], c[i], 0};
+      s.o[0] = jsonNumber(j, "cSeconds", 0) != 0;
+      s.o[1] = jsonNumber(j, "cDate", 1) != 0;
+      s.o[2] = jsonNumber(j, "cTemp", 1) != 0;
+      s.o[3] = jsonNumber(j, "cHumidity", 1) != 0;
+      s.o[4] = jsonNumber(j, "cWeather", 1) != 0;
+      faceCfg = s;
+      saveClockCfg();
+      Log.println("Reloj anterior migrado a la caratula " + String(s.face));
+    }
+    loadFaceSlots();
     stopAnim();
     clockCfg.enabled = true;
     forceWeatherRefresh = true;
-    lastClockDraw = 0;
+    lastClockSecond = 0;
     renderClock();
     stateKind = kind;
-    Log.println("Estado restaurado: reloj"); return;
+    Log.println("Estado restaurado: reloj " + String(faceCfg.face)); return;
   }
   Log.println("Estado '" + kind + "' no restaurable: pantalla inicial");
   showSplash();
+}
+
+// =========================
+// Clock runtime
+// =========================
+// The active face and its settings live in faceCfg (saved in /config/clock.json).
+
+// Defaults of the classic faces (also used when nothing was saved yet).
+void faceDefaults(FaceSettings& s) {
+  memset(&s, 0, sizeof(s));
+  strncpy(s.face, LEGACY_FACES[0], sizeof(s.face) - 1);
+  s.h24 = true;
+  const uint16_t cols[5] = {0x0000, 0xFFFF, 0x269D, 0xFB46, 0x7E9F};  // bg, primary, secondary, accent, weather
+  for (int i = 0; i < FACE_PAINTS; i++) s.p[i] = {i < 5 ? cols[i] : (uint16_t)0, i < 5 ? cols[i] : (uint16_t)0, 0};
+  s.o[1] = s.o[2] = s.o[3] = s.o[4] = 1;
+}
+
+// Reads face settings from the request (face, h24, lang, blink, a0..a9, b0..b9, d0..d9, o0..o7).
+void faceFromArgs(FaceSettings& s) {
+  String f = server.arg("face");
+  if (f.length() && faceExists(f.c_str())) {
+    memset(s.face, 0, sizeof(s.face));
+    strncpy(s.face, f.c_str(), sizeof(s.face) - 1);
+  }
+  if (server.hasArg("h24")) s.h24 = server.arg("h24") == "1";
+  if (server.hasArg("lang")) s.lang = server.arg("lang") == "1" ? 1 : 0;
+  if (server.hasArg("blink")) s.blink = server.arg("blink") == "1";
+  for (int i = 0; i < FACE_PAINTS; i++) {
+    String k = String(i);
+    if (server.hasArg("a" + k)) s.p[i].a = parseHex565(server.arg("a" + k));
+    if (server.hasArg("b" + k)) s.p[i].b = parseHex565(server.arg("b" + k));
+    if (server.hasArg("d" + k)) s.p[i].dir = (uint8_t)constrain(server.arg("d" + k).toInt(), 0, 4);
+  }
+  for (int i = 0; i < FACE_OPTS; i++) {
+    String k = "o" + String(i);
+    if (server.hasArg(k)) s.o[i] = (uint8_t)constrain(server.arg(k).toInt(), 0, 255);
+  }
+}
+
+String hex565(uint16_t c) {
+  char b[8];
+  int r = ((c >> 11) & 31) * 255 / 31, g = ((c >> 5) & 63) * 255 / 63, bl = (c & 31) * 255 / 31;
+  snprintf(b, sizeof(b), "#%02x%02x%02x", r, g, bl);
+  return String(b);
+}
+
+void saveClockCfg() {
+  String j = "{\"face\":\"" + String(faceCfg.face) + "\",\"h24\":" + String(faceCfg.h24 ? 1 : 0) +
+             ",\"lang\":" + String(faceCfg.lang) + ",\"blink\":" + String(faceCfg.blink ? 1 : 0);
+  const char* keys[3] = {"a", "b", "d"};
+  for (int k = 0; k < 3; k++) {
+    j += ",\"" + String(keys[k]) + "\":[";
+    for (int i = 0; i < FACE_PAINTS; i++) {
+      if (i) j += ",";
+      j += String(k == 0 ? faceCfg.p[i].a : k == 1 ? faceCfg.p[i].b : faceCfg.p[i].dir);
+    }
+    j += "]";
+  }
+  j += ",\"o\":[";
+  for (int i = 0; i < FACE_OPTS; i++) {
+    if (i) j += ",";
+    j += String(faceCfg.o[i]);
+  }
+  j += "]}";
+  ensureDir(CONFIG_DIR);
+  if (!writeAtomic(CLOCK_PATH, CLOCK_TMP, (const uint8_t*)j.c_str(), j.length())) Log.println("ERROR guardando carátula en microSD");
+}
+
+bool loadClockCfg(FaceSettings& s) {
+  File f = openWithFallback(CLOCK_PATH, CLOCK_TMP);
+  if (!f) return false;
+  String j = f.readString();
+  f.close();
+  String id = jsonString(j, "face");
+  if (!faceExists(id.c_str())) return false;
+  faceDefaults(s);
+  memset(s.face, 0, sizeof(s.face));
+  strncpy(s.face, id.c_str(), sizeof(s.face) - 1);
+  s.h24 = jsonNumber(j, "h24", 1) != 0;
+  s.lang = jsonNumber(j, "lang", 0) == 1 ? 1 : 0;
+  s.blink = jsonNumber(j, "blink", 0) != 0;
+  float v[FACE_PAINTS];
+  int n = jsonNumbers(j, 0, "a", v, FACE_PAINTS);
+  for (int i = 0; i < n; i++) s.p[i].a = (uint16_t)v[i];
+  n = jsonNumbers(j, 0, "b", v, FACE_PAINTS);
+  for (int i = 0; i < n; i++) s.p[i].b = (uint16_t)v[i];
+  n = jsonNumbers(j, 0, "d", v, FACE_PAINTS);
+  for (int i = 0; i < n; i++) s.p[i].dir = (uint8_t)constrain((int)v[i], 0, 4);
+  n = jsonNumbers(j, 0, "o", v, FACE_OPTS);
+  for (int i = 0; i < n; i++) s.o[i] = (uint8_t)constrain((int)v[i], 0, 255);
+  return true;
+}
+
+// Pictures of the "tablero" face: /config/slot0..2.rgb565 (18x18 RGB565, little endian).
+void loadFaceSlots() {
+  for (int i = 0; i < 3; i++) {
+    faceSlotOk[i] = false;
+    String p = String(CONFIG_DIR) + "/slot" + String(i) + ".rgb565";
+    File f = SD_MMC.open(p, FILE_READ);
+    if (!f) continue;
+    if (f.size() == sizeof(faceSlots[i])) faceSlotOk[i] = f.read((uint8_t*)faceSlots[i], sizeof(faceSlots[i])) == sizeof(faceSlots[i]);
+    f.close();
+  }
+}
+
+// nightMode: 0 = real day/night, 1 = force day, 2 = force night (editor preview).
+void faceEnvNow(FaceEnv& e, int nightMode) {
+  memset(&e, 0, sizeof(e));
+  time_t now = time(nullptr);
+  localtime_r(&now, &e.t);
+  e.timeValid = e.t.tm_year > (2016 - 1900);
+  bool isDay;
+  int sr, ss;
+  portENTER_CRITICAL(&wxMux);
+  e.wxValid = weatherValid;
+  e.temp = weatherTempC;
+  e.hum = weatherHumidityPct;
+  e.code = weatherCode;
+  isDay = weatherIsDay;
+  sr = wxSunriseMin;
+  ss = wxSunsetMin;
+  for (int i = 0; i < 4; i++) e.d[i] = wxDays[i];
+  portEXIT_CRITICAL(&wxMux);
+  int minutes = e.t.tm_hour * 60 + e.t.tm_min;
+  if (e.timeValid && sr >= 0 && ss >= 0) e.night = minutes < sr || minutes >= ss;
+  else if (e.wxValid) e.night = !isDay;
+  else e.night = e.t.tm_hour < 7 || e.t.tm_hour >= 19;
+  if (nightMode == 1) e.night = false;
+  else if (nightMode == 2) e.night = true;
+  e.wifi = WiFi.status() == WL_CONNECTED;
+  e.rssi = WiFi.RSSI();
+  for (int i = 0; i < 3; i++) e.slot[i] = faceSlotOk[i] ? faceSlots[i] : nullptr;
+}
+
+void blitFace() {
+  uint32_t started = millis();
+  display.clearDisplay();
+  for (int y = 0; y < 64; y++)
+    for (int x = 0; x < 64; x++) display.drawPixelRGB565(x, y, faceFb[y * 64 + x]);
+  display.showBuffer();
+  lastRenderMs = millis() - started;
+}
+
+void renderClock() {
+  if (!clockCfg.enabled) return;
+  FaceEnv e;
+  faceEnvNow(e, 0);
+  renderFace(faceCfg, e);
+  blitFace();
+}
+
+// Redraws once per second, right when the second changes.
+void serviceClock() {
+  if (!clockCfg.enabled || previewHoldUntil) return;
+  time_t now = time(nullptr);
+  if (now == lastClockSecond) return;
+  lastClockSecond = now;
+  renderClock();
+}
+
+void stopClock() {
+  clockCfg.enabled = false;
+}
+
+// Loop-side housekeeping: end of an editor preview and time zone changes
+// reported by the weather task (applied here, on the loop core).
+void serviceClockAux() {
+  if (previewHoldUntil && (int32_t)(millis() - previewHoldUntil) >= 0) {
+    previewHoldUntil = 0;
+    lastClockSecond = 0;
+    if (!clockCfg.enabled && !animationPlaying) {
+      if (stateKind == "frame") applyFrame();
+      else showSplash();
+    }
+  }
+  if (utcOffsetPending) {
+    int32_t off;
+    portENTER_CRITICAL(&wxMux);
+    off = pendingUtcOffset;
+    utcOffsetPending = false;
+    location.utcOffset = off;
+    portEXIT_CRITICAL(&wxMux);
+    applyUtcOffset(off);
+    saveLocation();
+    lastClockSecond = 0;
+    Log.println("Zona horaria: UTC" + String(off >= 0 ? "+" : "") + String(off / 3600.0f, 1));
+  }
+}
+
+// =========================
+// Location (weather + time zone)
+// =========================
+void loadLocation() {
+  File f = openWithFallback(LOCATION_PATH, LOCATION_TMP);
+  if (!f) return;
+  String j = f.readString();
+  f.close();
+  String name = jsonString(j, "name");
+  float lat = jsonNumber(j, "lat", NAN), lon = jsonNumber(j, "lon", NAN);
+  int32_t off = (int32_t)jsonNumber(j, "tz", (float)location.utcOffset);
+  if (isnan(lat) || isnan(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+  portENTER_CRITICAL(&wxMux);
+  if (name.length()) {
+    memset(location.name, 0, sizeof(location.name));
+    strncpy(location.name, name.c_str(), sizeof(location.name) - 1);
+  }
+  location.lat = lat;
+  location.lon = lon;
+  if (off > -50400 && off < 50400) location.utcOffset = off;
+  portEXIT_CRITICAL(&wxMux);
+}
+
+void saveLocation() {
+  LocationCfg loc;
+  portENTER_CRITICAL(&wxMux);
+  loc = location;
+  portEXIT_CRITICAL(&wxMux);
+  String j = "{\"name\":\"" + jsonEsc(String(loc.name)) + "\",\"lat\":" + String(loc.lat, 4) +
+             ",\"lon\":" + String(loc.lon, 4) + ",\"tz\":" + String(loc.utcOffset) + "}";
+  ensureDir(CONFIG_DIR);
+  if (!writeAtomic(LOCATION_PATH, LOCATION_TMP, (const uint8_t*)j.c_str(), j.length())) Log.println("ERROR guardando ubicacion en microSD");
 }
 
 // =========================
@@ -1423,7 +3032,7 @@ void connectWiFi(){
   WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
   // Keep a restored animation/clock running while waiting for the network.
   while(WiFi.status()!=WL_CONNECTED){serviceAnim();serviceClock();delay(10);}
-  configTime(-21600, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+  configTime(location.utcOffset, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
   startMDNS();
 }
 void serviceWiFi(){
@@ -1580,27 +3189,47 @@ void setupServer(){
   });
 
   server.on("/api/clock/config", HTTP_POST, [](){
+    FaceSettings s = faceCfg;
+    if (!faceExists(s.face)) faceDefaults(s);
+    faceFromArgs(s);
+    faceCfg = s;
+    loadFaceSlots();
     stopAnim();
-    clockCfg.mode = constrain(server.arg("mode").toInt(), 0, 4);
-    clockCfg.hour24 = server.arg("h24") == "1";
-    clockCfg.showSeconds = server.arg("seconds") == "1";
-    clockCfg.showDate = server.arg("date") == "1";
-    clockCfg.showTemp = server.arg("temp") == "1";
-    clockCfg.showHumidity = server.arg("humidity") == "1";
-    clockCfg.showWeather = server.arg("weather") == "1";
-    clockCfg.brightness = constrain(server.arg("brightness").toInt(), 1, 255);
-    clockCfg.bg = parseHex565(server.arg("bg"));
-    clockCfg.primary = parseHex565(server.arg("primary"));
-    clockCfg.secondary = parseHex565(server.arg("secondary"));
-    clockCfg.accent = parseHex565(server.arg("accent"));
-    clockCfg.weatherColor = parseHex565(server.arg("weatherColor"));
-    display.setBrightness(clockCfg.brightness);
+    previewHoldUntil = 0;
     clockCfg.enabled = true;
-    forceWeatherRefresh = true;
-    lastClockDraw = 0;
+    if (!weatherValid) forceWeatherRefresh = true;
+    lastClockSecond = 0;
     renderClock();
+    saveClockCfg();
     markState("clock");
-    Log.println("Modo reloj activado (diseno " + String(clockCfg.mode) + ")");
+    Log.println("Reloj activado: " + String(faceCfg.face));
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  // Renders a face with the settings of the request (not saved) and returns
+  // its 64x64 pixels as RGB565 little endian. panel=1 also shows it on the
+  // panel for 20 s; night=day|night forces the day/night version.
+  server.on("/api/clock/preview", HTTP_POST, [](){
+    FaceSettings s;
+    faceDefaults(s);
+    faceFromArgs(s);
+    String n = server.arg("night");
+    FaceEnv e;
+    faceEnvNow(e, n == "day" ? 1 : n == "night" ? 2 : 0);
+    renderFace(s, e);
+    if (server.arg("panel") == "1") {
+      previewHoldUntil = millis() + 20000;
+      if (!previewHoldUntil) previewHoldUntil = 1;
+      blitFace();
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.setContentLength(sizeof(faceFb));
+    server.send(200, "application/octet-stream", "");
+    server.sendContent((const char*)faceFb, sizeof(faceFb));
+  });
+
+  server.on("/api/clock/preview/end", HTTP_POST, [](){
+    if (previewHoldUntil) previewHoldUntil = millis() ? millis() : 1;
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -1617,18 +3246,77 @@ void setupServer(){
   });
 
   server.on("/api/clock/status", HTTP_GET, [](){
+    FaceEnv e;
+    faceEnvNow(e, 0);
+    LocationCfg loc;
+    float feels;
+    portENTER_CRITICAL(&wxMux);
+    loc = location;
+    feels = weatherFeelsC;
+    portEXIT_CRITICAL(&wxMux);
     String j = "{";
-    j += "\"enabled\":" + String(clockCfg.enabled ? "true" : "false") + ",";
-    j += "\"mode\":" + String(clockCfg.mode) + ",";
-    j += "\"brightness\":" + String(clockCfg.brightness) + ",";
-    j += "\"weatherValid\":" + String(weatherValid ? "true" : "false") + ",";
-    j += "\"temp\":" + String(weatherTempC, 1) + ",";
-    j += "\"humidity\":" + String(weatherHumidityPct, 0) + ",";
-    j += "\"feels\":" + String(weatherFeelsC, 1) + ",";
-    j += "\"weatherCode\":" + String(weatherCode) + ",";
-    j += "\"weatherText\":\"" + String(weatherShort(weatherCode)) + "\"";
-    j += "}";
+    j += "\"enabled\":" + String(clockCfg.enabled ? "true" : "false");
+    j += ",\"face\":\"" + String(faceCfg.face) + "\"";
+    j += ",\"h24\":" + String(faceCfg.h24 ? 1 : 0) + ",\"lang\":" + String(faceCfg.lang) + ",\"blink\":" + String(faceCfg.blink ? 1 : 0);
+    j += ",\"a\":[";
+    for (int i = 0; i < FACE_PAINTS; i++) j += String(i ? "," : "") + "\"" + hex565(faceCfg.p[i].a) + "\"";
+    j += "],\"b\":[";
+    for (int i = 0; i < FACE_PAINTS; i++) j += String(i ? "," : "") + "\"" + hex565(faceCfg.p[i].b) + "\"";
+    j += "],\"d\":[";
+    for (int i = 0; i < FACE_PAINTS; i++) j += String(i ? "," : "") + String(faceCfg.p[i].dir);
+    j += "],\"o\":[";
+    for (int i = 0; i < FACE_OPTS; i++) j += String(i ? "," : "") + String(faceCfg.o[i]);
+    j += "],\"brightness\":" + String(clockCfg.brightness);
+    j += ",\"city\":\"" + jsonEsc(String(loc.name)) + "\",\"lat\":" + String(loc.lat, 4) + ",\"lon\":" + String(loc.lon, 4) + ",\"tz\":" + String(loc.utcOffset);
+    j += ",\"weatherValid\":" + String(e.wxValid ? "true" : "false");
+    j += ",\"temp\":" + String(e.temp, 1) + ",\"humidity\":" + String(e.hum, 0) + ",\"feels\":" + String(feels, 1);
+    j += ",\"weatherCode\":" + String(e.code) + ",\"weatherText\":\"" + String(weatherShort(e.code)) + "\"";
+    j += ",\"night\":" + String(e.night ? "true" : "false");
+    j += ",\"days\":[";
+    for (int i = 0; i < 4; i++) {
+      const WxDay& d = e.d[i];
+      if (i) j += ",";
+      j += "{\"valid\":" + String(d.valid ? "true" : "false") + ",\"code\":" + String(d.code) + ",\"max\":" + String(d.tmax, 1) +
+           ",\"min\":" + String(d.tmin, 1) + ",\"hum\":" + String(d.hum, 0) + "}";
+    }
+    j += "]}";
+    server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", j);
+  });
+
+  server.on("/api/location", HTTP_GET, [](){
+    LocationCfg loc;
+    portENTER_CRITICAL(&wxMux);
+    loc = location;
+    portEXIT_CRITICAL(&wxMux);
+    server.send(200, "application/json", "{\"name\":\"" + jsonEsc(String(loc.name)) + "\",\"lat\":" + String(loc.lat, 4) +
+                ",\"lon\":" + String(loc.lon, 4) + ",\"tz\":" + String(loc.utcOffset) + "}");
+  });
+
+  server.on("/api/location", HTTP_POST, [](){
+    if (!server.hasArg("lat") || !server.hasArg("lon")) { server.send(400, "text/plain", "Faltan coordenadas"); return; }
+    float lat = server.arg("lat").toFloat(), lon = server.arg("lon").toFloat();
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) { server.send(400, "text/plain", "Coordenadas invalidas"); return; }
+    String name = server.arg("name");
+    name.replace("\"", "");
+    name.replace("\\", "");
+    name.trim();
+    if (!name.length()) name = String(lat, 2) + ", " + String(lon, 2);
+    portENTER_CRITICAL(&wxMux);
+    memset(location.name, 0, sizeof(location.name));
+    strncpy(location.name, name.c_str(), sizeof(location.name) - 1);
+    location.lat = lat;
+    location.lon = lon;
+    portEXIT_CRITICAL(&wxMux);
+    saveLocation();
+    forceWeatherRefresh = true;
+    Log.println("Ubicacion: " + name + " (" + String(lat, 4) + ", " + String(lon, 4) + ")");
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+
+  server.on("/api/fs/read", HTTP_GET, [](){
+    server.sendHeader("Cache-Control", "no-store");
+    if (!serveFile(safePath(server.arg("path")))) server.send(404, "text/plain", "No encontrado");
   });
 
   server.on("/api/gallery/save-image",HTTP_POST,[]{
@@ -1808,6 +3496,7 @@ void setupServer(){
     uint64_t used  = SD_MMC.usedBytes();
     String j = "{";
     j += "\"host\":\"" + String(MDNS_HOST) + ".local\",";
+    j += "\"city\":\"" + jsonEsc(String(location.name)) + "\",";
     j += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
     j += "\"ssid\":\"" + jsonEsc(WiFi.SSID()) + "\",";
     j += "\"mac\":\"" + WiFi.macAddress() + "\",";
@@ -1899,6 +3588,11 @@ void setup(){
   setupSD();
   Log.println("[2/5] microSD OK");
 
+  faceDefaults(faceCfg);
+  loadLocation();
+  applyUtcOffset(location.utcOffset);
+  Log.println("Ubicacion: " + String(location.name));
+
   Log.println("Restaurando ultimo estado del panel...");
   restoreState();
 
@@ -1940,6 +3634,7 @@ void loop(){
   serviceAnim();
   serviceClock();
   serviceState();
+  serviceClockAux();
   if(WiFi.status()==WL_CONNECTED)server.handleClient();
   serviceWiFi();
 }
