@@ -11,7 +11,10 @@
 #include <math.h>
 #include "hal/gpio_ll.h"
 
-#define PxMATRIX_DOUBLE_BUFFER true
+// PxMatrix only recognizes this lowercase name (or "double_buffer"). The old
+// uppercase PxMATRIX_DOUBLE_BUFFER was silently ignored, so every redraw was
+// drawn straight into the buffer being shown and the panel flickered.
+#define PxMATRIX_double_buffer true
 #include <PxMatrix.h>
 #include "esp_system.h"
 
@@ -1414,6 +1417,9 @@ void restoreState(){
 // =========================
 void startMDNS(){if(mdnsReady){MDNS.end();mdnsReady=false;}if(MDNS.begin(MDNS_HOST)){MDNS.addService("http","tcp",80);mdnsReady=true;}}
 void connectWiFi(){
+  // Credentials are passed on every boot; skip saving them to NVS so Wi-Fi
+  // (re)connects never write flash, which stalls both cores and the refresh.
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
   // Keep a restored animation/clock running while waiting for the network.
   while(WiFi.status()!=WL_CONNECTED){serviceAnim();serviceClock();delay(10);}

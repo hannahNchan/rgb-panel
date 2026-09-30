@@ -722,10 +722,16 @@ uint16_t c =
 Antes de incluir PxMatrix se define:
 
 ```cpp
-#define PxMATRIX_DOUBLE_BUFFER true
+#define PxMATRIX_double_buffer true
 ```
 
 Esto activa el doble buffer de PxMatrix.
+
+> **Ojo con el nombre.** PxMatrix solo reconoce `PxMATRIX_double_buffer` (en minúsculas) o el nombre legado `double_buffer`. Versiones anteriores de este firmware definían `PxMATRIX_DOUBLE_BUFFER` en mayúsculas: la librería lo ignoraba sin avisar, el doble buffer quedaba apagado y cada redibujado (frames de GIF, reloj, texto) se escribía sobre el buffer visible. La tarea de refresco mostraba frames a medio borrar y el panel parpadeaba; en el modo reloj, una vez por segundo exacto.
+>
+> Para comprobarlo en un binario, mide el objeto `display` con `xtensa-esp32-elf-nm -S -C index.ino.elf | grep " display$"`: con un solo buffer mide `0x1964` (6.5 KB); con doble buffer, `0x3164` (12.6 KB).
+
+Todos los caminos de dibujo (`applyFrame()`, `renderClock()`, `showSplash()`) limpian el buffer oculto, dibujan el frame completo y terminan con `showBuffer()`, que es lo que el doble buffer requiere.
 
 Conceptualmente:
 
@@ -1795,10 +1801,13 @@ En macOS/iOS, mDNS/Bonjour tiene soporte integrado.
 Configura:
 
 ```cpp
+WiFi.persistent(false);
 WiFi.mode(WIFI_STA);
 WiFi.setSleep(false);
 WiFi.begin(...);
 ```
+
+`WiFi.persistent(false)` evita que el SDK guarde la configuración Wi-Fi en NVS (flash) en cada `WiFi.begin()`. Escribir la flash desactiva la caché y **detiene los dos cores**, incluida la tarea de refresco del panel, lo que producía parpadeos en cada reconexión (`serviceWiFi()` reintenta cada 5 s cuando se cae la red). Las credenciales se pasan en cada arranque, así que no se pierde nada.
 
 `WIFI_STA` significa que el ESP32 se conecta al router existente.
 
@@ -1809,10 +1818,10 @@ No crea su propio AP.
 La función espera indefinidamente:
 
 ```cpp
-while(WiFi.status()!=WL_CONNECTED)
+while(WiFi.status()!=WL_CONNECTED){serviceAnim();serviceClock();delay(10);}
 ```
 
-Por tanto, si SSID o contraseña son incorrectos, el boot no continúa hasta iniciar el servidor.
+Por tanto, si SSID o contraseña son incorrectos, el boot no continúa hasta iniciar el servidor, pero el estado restaurado (animación o reloj) sigue corriendo en el panel mientras espera.
 
 ---
 
