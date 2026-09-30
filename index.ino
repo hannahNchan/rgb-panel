@@ -130,7 +130,7 @@ struct ClockConfig {
   bool showTemp = true;
   bool showHumidity = true;
   bool showWeather = true;
-  uint8_t brightness = 80;
+  uint8_t brightness = 20;
   uint16_t bg = 0x0000;
   uint16_t primary = 0xFFFF;
   uint16_t secondary = 0x06BF;
@@ -159,7 +159,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>Matrix Studio 64</title>
-  <link rel="stylesheet" href="/tailwind.css?v=53">
+  <link rel="stylesheet" href="/tailwind.css?v=54">
 </head>
 <body>
   <div id="app"></div>
@@ -171,7 +171,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     </div>
   </div>
   <div id="toastHost" class="toast-host"></div>
-  <script src="/app.js?v=53"></script>
+  <script src="/app.js?v=54"></script>
 </body>
 </html>)HTML";
 
@@ -226,6 +226,7 @@ label.field>.input,label.field>.select,label.field>.textarea{margin-top:7px}
 .rich-editor:empty:before{content:attr(data-placeholder);color:#5f718c}
 .preview-panel{display:flex;flex-direction:column;gap:12px}
 .library-card{border:1px solid var(--border);border-radius:16px;background:#0b1527;padding:12px}.library-card:hover{border-color:#48648a;background:#0f1d34;transform:translateY(-2px)}.library-card.active{border-color:#ff6b35;box-shadow:0 0 0 2px rgba(255,107,53,.45)}
+.giphy-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px;max-height:340px;overflow:auto}.giphy-grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;border:2px solid transparent;background:#000;cursor:pointer}.giphy-grid img:hover{border-color:#48648a}.giphy-grid img.active{border-color:#ff6b35}.giphy-attr{margin-left:auto;font-size:11px;font-weight:800;letter-spacing:.06em;color:#9aa9bf}
 .library-preview{width:100%;aspect-ratio:1;background:#000;border-radius:10px;image-rendering:pixelated}
 .table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:9px;border-bottom:1px solid #21324e;font-size:12px}.table th{color:#9eacc2}
 dialog{border:1px solid var(--border);border-radius:18px;background:#0d1729;color:#fff;width:min(620px,calc(100% - 28px));padding:0;box-shadow:0 35px 120px rgba(0,0,0,.7)}dialog::backdrop{background:rgba(0,0,0,.68);backdrop-filter:blur(5px)}.dialog-head,.dialog-body,.dialog-foot{padding:16px 18px}.dialog-head{border-bottom:1px solid var(--border);font-weight:850;font-size:18px}.dialog-foot{border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
@@ -274,7 +275,7 @@ host.innerHTML=`
    <button class="nav-btn" data-page="panel">Panel</button>
    <div class="card mt-3" style="padding:12px;box-shadow:none">
     <div class="text-xs muted">Brillo global</div>
-    <div class="quick-range mt-2"><input id="globalBrightness" type="range" min="1" max="255" value="80"><span id="globalBrightnessValue">80</span></div>
+    <div class="quick-range mt-2"><input id="globalBrightness" type="range" min="1" max="255" value="20"><span id="globalBrightnessValue">20</span></div>
    </div>
   </aside>
   <main class="content">
@@ -327,7 +328,7 @@ host.innerHTML=`
       <div class="switch-row"><span>Temperatura</span><label class="switch"><input id="clockTemp" type="checkbox" checked><span class="switch-track"></span></label></div>
       <div class="switch-row"><span>Humedad</span><label class="switch"><input id="clockHumidity" type="checkbox" checked><span class="switch-track"></span></label></div>
       <div class="switch-row"><span>Estado del clima</span><label class="switch"><input id="clockWeather" type="checkbox" checked><span class="switch-track"></span></label></div>
-      <label class="field mt-3">Brillo del reloj<div class="quick-range mt-2"><input id="clockBrightness" type="range" min="1" max="255" value="80"><span id="clockBrightnessValue">80</span></div></label>
+      <label class="field mt-3">Brillo del reloj<div class="quick-range mt-2"><input id="clockBrightness" type="range" min="1" max="255" value="20"><span id="clockBrightnessValue">20</span></div></label>
      </div>
      <div class="card">
       <div class="card-title">Colores</div>
@@ -353,8 +354,16 @@ host.innerHTML=`
     <div class="grid-2">
      <div class="card">
       <div class="card-title">Nuevo GIF</div>
-      <label class="file-picker" for="gifFile"><span class="file-button">Elegir GIF</span><span class="file-name" id="gifFileName">Ningún archivo</span></label>
-      <input class="file-native" id="gifFile" type="file" accept="image/gif">
+      <div class="toolbar"><button class="btn btn-primary gif-tab" data-tab="upload">Subir GIF</button><button class="btn gif-tab" data-tab="giphy">Buscar en Giphy</button></div>
+      <div class="mt-3" id="gifTabUpload">
+       <label class="file-picker" for="gifFile"><span class="file-button">Elegir GIF</span><span class="file-name" id="gifFileName">Ningún archivo</span></label>
+       <input class="file-native" id="gifFile" type="file" accept="image/gif">
+      </div>
+      <div class="mt-3 hidden" id="gifTabGiphy">
+       <div class="row-wrap"><input class="input" style="flex:1;min-width:0" id="giphyQuery" placeholder="Buscar GIFs…"><button class="btn btn-primary" id="giphySearch">Buscar</button></div>
+       <div class="giphy-grid mt-3" id="giphyGrid"></div>
+       <div class="row-wrap mt-3"><button class="btn hidden" id="giphyMore">Cargar más</button><span class="giphy-attr">Powered by GIPHY</span></div>
+      </div>
       <div class="split mt-3">
        <label class="field">Ajuste 64×64<select class="select" id="gifFit"><option value="contain">Contener (completo)</option><option value="cover">Recortar (llenar)</option><option value="stretch">Estirar</option></select></label>
        <label class="field">Nombre<input class="input" id="gifName" placeholder="mi-gif"></label>
@@ -372,7 +381,7 @@ host.innerHTML=`
    </section>
    <section class="page" id="page-admin"><div class="page-head"><div><h2>Admin SD</h2><p>Gestiona archivos sin desmontar el display.</p></div></div><div class="card"><div class="row-wrap"><input class="input" style="max-width:420px" id="adminPath" value="/www"><button class="btn" id="listFiles">Listar</button><button class="btn" id="mkdir">Crear carpeta</button></div><label class="file-picker mt-3" for="adminUpload"><span class="file-button">Elegir archivos</span><span class="file-name" id="adminFileName">Ningún archivo</span></label><input class="file-native" id="adminUpload" type="file" multiple><button class="btn btn-green mt-3" id="uploadFiles">Subir a carpeta actual</button><div class="mt-4" id="fileList"></div></div></section>
    <section class="page" id="page-firmware"><div class="page-head"><div><h2>Firmware OTA</h2><p>Actualiza el ESP32 desde el navegador.</p></div></div><div class="card"><label class="file-picker" for="fwFile"><span class="file-button">Elegir .bin</span><span class="file-name" id="fwFileName">Ningún firmware</span></label><input class="file-native" id="fwFile" type="file" accept=".bin,application/octet-stream"><button class="btn btn-primary mt-4" id="fwUpload">Instalar firmware</button></div></section>
-   <section class="page" id="page-panel"><div class="page-head"><div><h2>Panel</h2><p>Estado y ajustes del sistema.</p></div></div><div class="card"><div class="stats" id="stats"></div><label class="field mt-4">Brillo<div class="quick-range mt-2"><input id="brightness" type="range" min="1" max="255" value="80"><span id="brightnessValue">80</span></div></label></div></section>
+   <section class="page" id="page-panel"><div class="page-head"><div><h2>Panel</h2><p>Estado y ajustes del sistema.</p></div></div><div class="card"><div class="stats" id="stats"></div><label class="field mt-4">Brillo<div class="quick-range mt-2"><input id="brightness" type="range" min="1" max="255" value="20"><span id="brightnessValue">20</span></div></label></div></section>
   </main>
  </div>
 </div>`;
@@ -545,8 +554,56 @@ async function gifRefresh(file){
   try{const frames=await gifDecode(file,$('#gifFit').value);gifFrames=frames;$('#gifInfo').textContent=`${frames.length} frames · listo para agregar`;$('#gifAdd').disabled=false;gifPlayPreview(frames)}
   catch(e){$('#gifInfo').textContent=e.message;toast(e.message,'err')}
 }
-$('#gifFile').onchange=e=>{const f=e.target.files[0];if(!f)return;$('#gifFileName').textContent=f.name;if(!$('#gifName').value)$('#gifName').value=f.name.replace(/\.gif$/i,'');gifRefresh(f)};
+$('#gifFile').onchange=e=>{const f=e.target.files[0];if(!f)return;$('#gifFileName').textContent=f.name;$('#gifName').value=f.name.replace(/\.gif$/i,'');gifRefresh(f)};
 $('#gifFit').onchange=()=>{if(gifFile)gifRefresh(gifFile)};
+
+// ---- Giphy search ----
+// Runs in the browser (the client has Internet); the ESP32 is not involved.
+// A picked GIF is downloaded as a Blob and goes through the same decode flow.
+const GIPHY_API_KEY='MnOOWuodMfdUZSUKd3fOiYJNakT0yHtp';
+let giphyOffset=0,giphyTotal=0,giphyLoaded=false;
+$$('.gif-tab').forEach(b=>b.onclick=()=>{
+  $$('.gif-tab').forEach(x=>x.classList.toggle('btn-primary',x===b));
+  $('#gifTabUpload').classList.toggle('hidden',b.dataset.tab!=='upload');
+  $('#gifTabGiphy').classList.toggle('hidden',b.dataset.tab!=='giphy');
+  if(b.dataset.tab==='giphy'&&!giphyLoaded)giphyLoad(true);
+});
+async function giphyLoad(reset){
+  const q=$('#giphyQuery').value.trim(),grid=$('#giphyGrid');
+  if(reset){giphyOffset=0;grid.innerHTML='<div class="muted">Cargando…</div>'}
+  const url='https://api.giphy.com/v1/gifs/'+(q?'search':'trending')+'?api_key='+GIPHY_API_KEY+'&limit=24&offset='+giphyOffset+(q?'&lang=es&q='+encodeURIComponent(q):'');
+  try{
+    const r=await fetch(url),d=await r.json();
+    if(!r.ok)throw Error((d.meta&&d.meta.msg)||('Giphy '+r.status));
+    const items=d.data||[];
+    if(reset)grid.innerHTML=items.length?'':'<div class="muted">Sin resultados.</div>';
+    giphyLoaded=true;
+    for(const g of items){
+      const im=g.images||{},prev=im.fixed_width_small||im.fixed_height_small||im.fixed_height;
+      if(!prev)continue;
+      const el=document.createElement('img');el.loading='lazy';el.alt=g.title||'';el.src=prev.webp||prev.url;
+      el.onclick=()=>giphyPick(g,el);grid.appendChild(el);
+    }
+    giphyOffset+=items.length;giphyTotal=(d.pagination&&d.pagination.total_count)||0;
+    $('#giphyMore').classList.toggle('hidden',!(items.length&&giphyOffset<giphyTotal&&giphyOffset<4999));
+  }catch(e){if(reset)grid.innerHTML='<div class="muted">No se pudo consultar Giphy.</div>';toast(e.message,'err')}
+}
+async function giphyPick(g,el){
+  $$('#giphyGrid img').forEach(x=>x.classList.remove('active'));el.classList.add('active');
+  const im=g.images||{},src=(im.fixed_height&&im.fixed_height.url)||(im.downsized&&im.downsized.url)||(im.original&&im.original.url);
+  if(!src)return toast('Ese GIF no tiene versión descargable','err');
+  $('#gifInfo').textContent='Descargando de Giphy…';$('#gifAdd').disabled=true;
+  try{
+    const r=await fetch(src);if(!r.ok)throw Error('Giphy '+r.status);
+    const blob=await r.blob();
+    const title=((g.title||g.slug||'giphy').replace(/\s*GIF(\s+by\s+.*)?$/i,'').trim()||'giphy').slice(0,40);
+    $('#gifName').value=title;$('#gifFileName').textContent='Giphy: '+title;
+    await gifRefresh(blob);
+  }catch(e){$('#gifInfo').textContent=e.message;toast(e.message,'err')}
+}
+$('#giphySearch').onclick=()=>giphyLoad(true);
+$('#giphyQuery').onkeydown=e=>{if(e.key==='Enter')giphyLoad(true)};
+$('#giphyMore').onclick=()=>giphyLoad(false);
 $('#gifAdd').onclick=async()=>{
   if(!gifFrames||!gifFile)return toast('Elige un GIF','err');
   let base=($('#gifName').value||'gif').trim().replace(/[^a-zA-Z0-9_-]/g,'_')||'gif';
@@ -613,7 +670,7 @@ bool writeText(const char* path, const char* src){
   f.close(); return true;
 }
 
-const char* WEB_ASSET_VERSION = "5.3";
+const char* WEB_ASSET_VERSION = "5.4";
 
 void provisionWeb(){
   ensureDir(WWW_DIR);
@@ -1333,7 +1390,7 @@ void setupDisplay(){
   // Priorizamos estabilidad y dejamos el refresh al timer hardware.
   display.setFastUpdate(false);
 
-  display.setBrightness(80);
+  display.setBrightness(20);
   display.clearDisplay(false);
   display.clearDisplay(true);
 

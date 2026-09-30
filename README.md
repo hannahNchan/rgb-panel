@@ -607,7 +607,7 @@ Esto permite que, una vez operativo el Admin SD, los assets puedan modificarse s
 El firmware documentado contiene:
 
 ```cpp
-const char* WEB_ASSET_VERSION = "5.3";
+const char* WEB_ASSET_VERSION = "5.4";
 ```
 
 Aunque el archivo de firmware se llame `v5_3`, este valor **no es necesariamente la versión semántica completa del firmware**.
@@ -1329,6 +1329,15 @@ DELETE /api/gifs/delete?name=<base> Borra <base>.gif y <base>.pma de la microSD
 ```
 
 La subida reutiliza `/api/fs/upload?path=/gallery/gifs/<base>.<ext>` (handler `genericUpload`).
+
+### Búsqueda en Giphy
+
+La tarjeta **Nuevo GIF** tiene dos pestañas: **Subir GIF** (archivo local) y **Buscar en Giphy**.
+
+- La consulta la hace el **navegador** directamente contra `https://api.giphy.com/v1/gifs/search` (o `trending` al abrir la pestaña sin texto). El ESP32 no participa; el cliente necesita Internet.
+- La API key está en `app.js` como `GIPHY_API_KEY`. Es una *beta key*: 100 llamadas por hora y hasta 50 resultados por petición.
+- El grid usa la versión `fixed_width_small` (ligera). Al elegir un GIF se descarga la versión `fixed_height` como Blob y entra al mismo flujo que un archivo subido: decodificación, ajuste 64×64, PMA2 y **Agregar al historial**.
+- La pestaña muestra "Powered by GIPHY", requerido por los términos de la API.
 
 Límite: se procesan hasta `GIF_MAX_FRAMES` (300) frames por GIF para acotar memoria y espacio en la SD.
 
