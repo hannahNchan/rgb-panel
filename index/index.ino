@@ -69,8 +69,8 @@ LogTee Log;
 // =========================
 // WIFI
 // =========================
-const char* WIFI_SSID = "";
-const char* WIFI_PASSWORD = "";
+const char* WIFI_SSID = "DarkMaster-666";
+const char* WIFI_PASSWORD = "H*nnaHChan1";
 const char* MDNS_HOST = "matrix";
 
 // =========================
