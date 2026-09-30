@@ -17,8 +17,8 @@
 // =========================
 // WIFI
 // =========================
-const char* WIFI_SSID = "TU_SSID";
-const char* WIFI_PASSWORD = "TU_PASSWORD";
+const char* WIFI_SSID = "DarkMaster-666";
+const char* WIFI_PASSWORD = "H*nnaHChan1";
 const char* MDNS_HOST = "matrix";
 
 // =========================
@@ -437,8 +437,10 @@ $('#fwFile').onchange=e=>$('#fwFileName').textContent=e.target.files[0]?.name||'
 async function loadStatus(){try{const s=await (await fetch('/api/status')).json();$('#connectionText').textContent=`${s.ip} · ${s.rssi??'?'} dBm`;$('#stats').innerHTML=`<div class="stat"><div class="v">${s.ip}</div><div class="k">IP</div></div><div class="stat"><div class="v">${s.rssi??'?'} dBm</div><div class="k">Wi-Fi</div></div><div class="stat"><div class="v">${s.sdUsedMB??'?'} / ${s.sdTotalMB??'?'} MB</div><div class="k">microSD</div></div><div class="stat"><div class="v">${s.lastRenderMs??'?'} ms</div><div class="k">Último render</div></div>`}catch{$('#connectionText').textContent='sin conexión'}}loadStatus();setInterval(loadStatus,10000);loadClockStatus();
 
 // ---- GIF's ----
-// GIFs are decoded in the browser (ImageDecoder), each frame is fitted to 64x64
-// and packed into PMA2 (per-frame delay). The panel never decodes GIFs itself.
+// GIFs are decoded in the browser with a self-contained GIF89a decoder (LZW +
+// frame disposal). This works over plain HTTP; the WebCodecs ImageDecoder API
+// is only available in secure contexts, so it is not used here. Each frame is
+// fitted to 64x64 and packed into PMA2. The panel never decodes GIFs itself.
 const GIF_MAX_FRAMES=300;
 let gifFrames=null,gifFile=null,gifSelected=null,gifTimer=null;
 const gifCtx=$('#gifCanvas').getContext('2d',{willReadFrequently:true});
@@ -449,29 +451,79 @@ function gifFitRect(sw,sh,mode){
   const dw=Math.max(1,Math.round(sw*s)),dh=Math.max(1,Math.round(sh*s));
   return{dx:Math.round((64-dw)/2),dy:Math.round((64-dh)/2),dw,dh};
 }
-async function gifDecode(file,mode){
-  if(typeof ImageDecoder==='undefined')throw new Error('Este navegador no soporta ImageDecoder. Usa Chrome o un Safari reciente.');
-  const dec=new ImageDecoder({data:await file.arrayBuffer(),type:'image/gif'});
-  if(dec.completed)await dec.completed;
-  await dec.tracks.ready;
-  const track=dec.tracks.selectedTrack;
-  const count=Math.min(track?track.frameCount||1:1,GIF_MAX_FRAMES);
-  const tmp=document.createElement('canvas');tmp.width=64;tmp.height=64;
-  const t=tmp.getContext('2d',{willReadFrequently:true});
-  const frames=[];
-  for(let i=0;i<count;i++){
-    const {image}=await dec.decode({frameIndex:i});
-    t.fillStyle='#000';t.fillRect(0,0,64,64);
-    const r=gifFitRect(image.displayWidth||image.codedWidth,image.displayHeight||image.codedHeight,mode);
-    t.drawImage(image,r.dx,r.dy,r.dw,r.dh);
-    let delay=Math.round((image.duration||0)/1000);
-    if(!delay||delay<20)delay=100;if(delay>5000)delay=5000;
-    frames.push({data:to565(tmp),delay});
-    if(image.close)image.close();
+// GIF LZW: decodes one image's index stream into iw*ih palette indices.
+function gifLzw(minCodeSize,data,npix){
+  const clear=1<<minCodeSize,eoi=clear+1;
+  const prefix=new Int16Array(4096),suffix=new Uint8Array(4096),stack=new Uint8Array(4097),out=new Uint8Array(npix);
+  for(let c=0;c<clear;c++){prefix[c]=0;suffix[c]=c;}
+  let codeSize=minCodeSize+1,mask=(1<<codeSize)-1,available=clear+2,old=-1,first=0;
+  let datum=0,bits=0,dp=0,top=0,i=0;
+  while(i<npix){
+    if(top===0){
+      if(bits<codeSize){if(dp>=data.length)break;datum+=data[dp++]<<bits;bits+=8;continue;}
+      let code=datum&mask;datum>>=codeSize;bits-=codeSize;
+      if(code>available||code===eoi)break;
+      if(code===clear){codeSize=minCodeSize+1;mask=(1<<codeSize)-1;available=clear+2;old=-1;continue;}
+      if(old===-1){stack[top++]=suffix[code];old=code;first=code;continue;}
+      const inCode=code;
+      if(code===available){stack[top++]=first;code=old;}
+      while(code>clear){stack[top++]=suffix[code];code=prefix[code];}
+      first=suffix[code]&0xff;stack[top++]=first;
+      if(available<4096){prefix[available]=old;suffix[available]=first;available++;if((available&mask)===0&&available<4096){codeSize++;mask+=available;}}
+      old=inCode;
+    }
+    top--;out[i++]=stack[top];
   }
-  if(dec.close)dec.close();
-  if(!frames.length)throw new Error('El GIF no tiene frames legibles');
-  return frames;
+  return out;
+}
+// Full GIF89a parse: composites frames (disposal-aware), fits each to 64x64 and
+// returns [{data:RGB565(8192), delay:ms}].
+async function gifDecode(file,mode){
+  const b=new Uint8Array(await file.arrayBuffer());let p=0;
+  if(b[0]!==71||b[1]!==73||b[2]!==70)throw new Error('Archivo GIF inválido');
+  p=6;
+  const rd16=()=>{const v=b[p]|(b[p+1]<<8);p+=2;return v};
+  const W=rd16(),H=rd16();const scr=b[p++];p+=2;
+  let gct=null;if(scr&0x80){const n=2<<(scr&7);gct=b.subarray(p,p+n*3);p+=n*3;}
+  if(!W||!H)throw new Error('GIF sin dimensiones');
+  const canvas=new Uint8ClampedArray(W*H*4);
+  const src=document.createElement('canvas');src.width=W;src.height=H;const sctx=src.getContext('2d');
+  const tmp=document.createElement('canvas');tmp.width=64;tmp.height=64;const t=tmp.getContext('2d',{willReadFrequently:true});
+  const rect=gifFitRect(W,H,mode);
+  let saved=null,prevDisp=0,pl=0,pt=0,pw=0,ph=0;
+  let delay=0,tflag=false,tindex=0,disposal=0;
+  const out=[];
+  while(p<b.length){
+    const blk=b[p++];
+    if(blk===0x3B)break;
+    if(blk===0x21){
+      const label=b[p++];
+      if(label===0xF9){const sz=b[p++];const pk=b[p];delay=b[p+1]|(b[p+2]<<8);tindex=b[p+3];tflag=(pk&1)===1;disposal=(pk>>2)&7;p+=sz;p++;}
+      else{while(b[p]!==0)p+=b[p]+1;p++;}
+    }else if(blk===0x2C){
+      const left=rd16(),top2=rd16(),iw=rd16(),ih=rd16();const ip=b[p++];
+      let ct=gct;if(ip&0x80){const n=2<<(ip&7);ct=b.subarray(p,p+n*3);p+=n*3;}
+      const interlace=(ip&0x40)!==0;const minCode=b[p++];
+      let size=0,q=p;while(b[q]!==0){size+=b[q];q+=b[q]+1;}
+      const data=new Uint8Array(size);let o=0,r=p;while(b[r]!==0){const c=b[r++];for(let k=0;k<c;k++)data[o++]=b[r++];}p=r+1;
+      if(!ct){tflag=false;disposal=0;delay=0;continue;}
+      const idx=gifLzw(minCode,data,iw*ih);
+      if(prevDisp===2){for(let y=0;y<ph;y++)for(let x=0;x<pw;x++){const o4=((pt+y)*W+(pl+x))*4;canvas[o4]=canvas[o4+1]=canvas[o4+2]=canvas[o4+3]=0;}}
+      else if(prevDisp===3&&saved)canvas.set(saved);
+      if(disposal===3)saved=canvas.slice();
+      const rows=new Int32Array(ih);
+      if(interlace){let j=0;const passes=[[0,8],[4,8],[2,4],[1,2]];for(const pa of passes)for(let y=pa[0];y<ih;y+=pa[1])rows[j++]=y;}else for(let y=0;y<ih;y++)rows[y]=y;
+      for(let sy=0;sy<ih;sy++){const y=rows[sy];for(let x=0;x<iw;x++){const ci=idx[sy*iw+x];if(tflag&&ci===tindex)continue;const cy=top2+y,cx=left+x;if(cy<0||cx<0||cy>=H||cx>=W)continue;const o4=(cy*W+cx)*4,c3=ci*3;canvas[o4]=ct[c3];canvas[o4+1]=ct[c3+1];canvas[o4+2]=ct[c3+2];canvas[o4+3]=255}}
+      sctx.putImageData(new ImageData(canvas,W,H),0,0);
+      t.fillStyle='#000';t.fillRect(0,0,64,64);t.imageSmoothingEnabled=mode!=='stretch';t.drawImage(src,rect.dx,rect.dy,rect.dw,rect.dh);
+      let ms=delay*10;if(!ms||ms<20)ms=100;if(ms>5000)ms=5000;
+      out.push({data:to565(tmp),delay:ms});
+      prevDisp=disposal;pl=left;pt=top2;pw=iw;ph=ih;tflag=false;disposal=0;delay=0;
+      if(out.length>=GIF_MAX_FRAMES)break;
+    }else break;
+  }
+  if(!out.length)throw new Error('El GIF no tiene frames legibles');
+  return out;
 }
 function gifBuildPma2(frames){
   const per=2+8192,out=new Uint8Array(10+frames.length*per),dv=new DataView(out.buffer);

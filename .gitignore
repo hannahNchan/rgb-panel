@@ -1,0 +1,8 @@
+.DS_Store
+**/.DS_Store
+sketch_*/
+build/
+*.bin
+*.elf
+*.map
+*.hex

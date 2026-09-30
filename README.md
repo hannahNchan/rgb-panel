@@ -554,7 +554,7 @@ Contiene los GIFs subidos desde la sección **GIF's** de la interfaz. Por cada G
 - `<nombre>.gif`: el GIF original, servido en `/gifs?name=<nombre>.gif` para el preview animado del historial.
 - `<nombre>.pma`: la conversión a 64×64 en formato `PMA2` (delay por frame) que reproduce el panel.
 
-El GIF se decodifica y convierte **en el navegador** (`ImageDecoder`); el ESP32 nunca decodifica GIFs.
+El GIF se decodifica y convierte **en el navegador** con un decodificador GIF89a propio en JavaScript (LZW + disposal); el ESP32 nunca decodifica GIFs.
 
 ### `/gallery/remote`
 
@@ -1332,7 +1332,7 @@ La subida reutiliza `/api/fs/upload?path=/gallery/gifs/<base>.<ext>` (handler `g
 
 Límite: se procesan hasta `GIF_MAX_FRAMES` (300) frames por GIF para acotar memoria y espacio en la SD.
 
-Requisito de navegador: la decodificación usa `ImageDecoder` (WebCodecs). Navegadores sin soporte muestran un aviso y no pueden convertir GIFs animados.
+Decodificación: se hace con un decodificador GIF89a propio en JavaScript puro (incluido en `app.js`, servido desde la SD). No depende de `ImageDecoder`/WebCodecs ni de contexto seguro, por lo que funciona sobre HTTP plano en la LAN. No requiere internet ni CDN externo.
 
 ---
 
