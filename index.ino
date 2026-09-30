@@ -13,6 +13,55 @@
 
 #define PxMATRIX_DOUBLE_BUFFER true
 #include <PxMatrix.h>
+#include "esp_system.h"
+
+// =========================
+// Log (Serial tee)
+// =========================
+// Everything printed through Log goes to Serial and is also kept in a RAM ring
+// buffer, so the web "Estado" page can show the same messages as the Serial
+// Monitor (/api/log). Guarded by a spinlock: the weather task logs from core 0.
+constexpr int LOG_LINES = 80;
+constexpr int LOG_LINE_LEN = 120;
+struct LogLine { uint32_t seq; uint32_t ms; char text[LOG_LINE_LEN]; };
+portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
+
+class LogTee : public Print {
+ public:
+  size_t write(uint8_t c) override {
+    Serial.write(c);
+    if (c == '\r') return 1;
+    portENTER_CRITICAL(&logMux);
+    if (c == '\n') commitLocked();
+    else if (len < LOG_LINE_LEN - 1) cur[len++] = (char)c;
+    portEXIT_CRITICAL(&logMux);
+    return 1;
+  }
+  size_t write(const uint8_t* b, size_t n) override { for (size_t i = 0; i < n; i++) write(b[i]); return n; }
+  uint32_t nextSeq() { portENTER_CRITICAL(&logMux); uint32_t v = seq; portEXIT_CRITICAL(&logMux); return v; }
+  // Copies lines with seq >= since (oldest first) into out; returns how many.
+  int snapshot(uint32_t since, LogLine* out, int max) {
+    int n = 0;
+    portENTER_CRITICAL(&logMux);
+    uint32_t first = seq > (uint32_t)LOG_LINES ? seq - LOG_LINES : 0;
+    if (since < first) since = first;
+    for (uint32_t s = since; s < seq && n < max; s++) out[n++] = ring[s % LOG_LINES];
+    portEXIT_CRITICAL(&logMux);
+    return n;
+  }
+ private:
+  void commitLocked() {
+    LogLine& l = ring[seq % LOG_LINES];
+    l.seq = seq; l.ms = millis();
+    memcpy(l.text, cur, len); l.text[len] = 0;
+    seq++; len = 0;
+  }
+  LogLine ring[LOG_LINES];
+  char cur[LOG_LINE_LEN];
+  int len = 0;
+  uint32_t seq = 0;
+};
+LogTee Log;
 
 // =========================
 // WIFI
@@ -82,11 +131,11 @@ bool startMatrixRefreshTask() {
 
   if (result != pdPASS) {
     matrixRefreshTaskHandle = nullptr;
-    Serial.println("ERROR: no se pudo crear tarea de refresco HUB75");
+    Log.println("ERROR: no se pudo crear tarea de refresco HUB75");
     return false;
   }
 
-  Serial.println("Refresh HUB75: tarea FreeRTOS cada 2 ms");
+  Log.println("Refresh HUB75: tarea FreeRTOS cada 2 ms");
   return true;
 }
 
@@ -159,7 +208,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>Matrix Studio 64</title>
-  <link rel="stylesheet" href="/tailwind.css?v=55">
+  <link rel="stylesheet" href="/tailwind.css?v=56">
 </head>
 <body>
   <div id="app"></div>
@@ -171,7 +220,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     </div>
   </div>
   <div id="toastHost" class="toast-host"></div>
-  <script src="/app.js?v=55"></script>
+  <script src="/app.js?v=56"></script>
 </body>
 </html>)HTML";
 
@@ -244,6 +293,46 @@ dialog{border:1px solid var(--border);border-radius:18px;background:#0d1729;colo
 .checkbox-line{display:flex;align-items:center;gap:8px;font-size:12px;color:#c7d3e4}.checkbox-line input{width:17px;height:17px;accent-color:#ff6b35}
 .quick-range{display:grid;grid-template-columns:1fr 44px;gap:9px;align-items:center}.quick-range input[type=range]{width:100%;accent-color:#ff6b35}
 @media(max-width:760px){.clock-layouts{grid-template-columns:repeat(2,1fr)}.color-grid{grid-template-columns:1fr}.clock-info{grid-template-columns:1fr 1fr}}
+.brand-row{display:flex;align-items:center;gap:13px}.logo{display:grid;grid-template-columns:repeat(2,10px);gap:3px;flex:none}.logo i{width:10px;height:10px;border-radius:3px;background:#ef4444}.logo i:nth-child(2){background:#22c55e}.logo i:nth-child(3){background:#3b82f6}.logo i:nth-child(4){background:#f8fafc}
+.nav-group{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#5d6f8c;font-weight:800;padding:14px 13px 4px}.nav-group:first-child{padding-top:4px}
+.nav-btn{display:flex;align-items:center;gap:11px}.nav-btn svg{width:18px;height:18px;flex:none}
+.nav-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);margin-left:auto;flex:none}.nav-dot.off,.dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+.page.active{animation:pagein .22s ease}@keyframes pagein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.tabbar,.sheet,.sheet-backdrop{display:none}
+.tab{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;border:0;background:transparent;color:#8494ad;font:inherit;font-size:11px;font-weight:700;padding:3px 0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.tab .ic{position:relative;width:58px;height:30px;display:grid;place-items:center;border-radius:999px;transition:background .2s,color .2s,transform .12s}
+.tab svg{width:22px;height:22px}.tab.active{color:#fff}.tab.active .ic{background:rgba(255,107,53,.18);color:var(--accent)}.tab:active .ic{transform:scale(.92)}
+.tab-badge{position:absolute;top:3px;right:15px;width:9px;height:9px;border-radius:50%;background:var(--red);border:2px solid #0a111f}
+.sheet-backdrop{position:fixed;inset:0;z-index:70;background:rgba(2,6,15,.62);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);opacity:0;pointer-events:none;transition:opacity .22s}.sheet-backdrop.open{opacity:1;pointer-events:auto}
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:71;max-height:86vh;overflow-y:auto;overscroll-behavior:contain;background:#0c1424;border:1px solid var(--border);border-bottom:0;border-radius:24px 24px 0 0;padding:6px 16px calc(20px + env(safe-area-inset-bottom));transform:translateY(105%);transition:transform .28s cubic-bezier(.2,.8,.2,1);box-shadow:0 -24px 70px rgba(0,0,0,.55)}.sheet.open{transform:none}
+.sheet-handle{width:44px;height:5px;border-radius:9px;background:#34486d;margin:6px auto 10px}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;margin:2px 2px 6px}.sheet-head h3{margin:0;font-size:17px}
+.sheet-close{border:0;background:#13213a;color:#c9d4e5;width:34px;height:34px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer}
+.sheet-bright{background:#08111f;border:1px solid var(--border);border-radius:16px;padding:12px 14px;margin-top:8px}
+.sheet-group{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#5d6f8c;font-weight:800;margin:16px 2px 8px}
+.sheet-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;min-height:78px;padding:10px 4px;border-radius:16px;border:1px solid var(--border);background:#0a1322;color:#c9d4e5;font:inherit;font-size:11.5px;font-weight:700;text-align:center;line-height:1.15;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.tile svg{width:24px;height:24px;color:#9fb0c9}.tile.active{border-color:var(--accent);background:rgba(255,107,53,.12);color:#fff}.tile.active svg{color:var(--accent)}.tile:active{transform:scale(.97)}.tile .nav-dot{position:absolute;top:9px;right:9px;margin:0}
+body.no-scroll{overflow:hidden}
+.page-head .pill{white-space:nowrap;flex:none}
+.status-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+.status-title{display:flex;align-items:center;gap:9px;font-weight:850;margin-bottom:8px}.status-title svg{width:18px;height:18px;color:var(--accent)}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid rgba(36,53,82,.55);font-size:13px}.kv:last-child{border-bottom:0}.kv span{color:var(--muted);flex:none}.kv b{font-weight:750;text-align:right;word-break:break-word}
+.meter{height:6px;background:#16243a;border-radius:99px;overflow:hidden;margin:2px 0 6px}.meter span{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#ff6b35);border-radius:99px}
+.monitor-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.monitor{height:360px;overflow:auto;background:#03060d;border:1px solid #1c2a42;border-radius:14px;padding:12px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#cbd5e1;white-space:pre-wrap;word-break:break-word}
+.monitor .ts{color:#4b5d7a;margin-right:10px}.monitor .ok{color:#86efac}.monitor .warn{color:#fcd34d}.monitor .err{color:#fca5a5}
+@media(max-width:980px){
+  .shell{padding:0 14px calc(96px + env(safe-area-inset-bottom))}
+  .topbar{position:sticky;top:0;z-index:40;margin:0 -14px 16px;padding:calc(12px + env(safe-area-inset-top)) 18px 12px;background:rgba(5,8,17,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-bottom:1px solid rgba(36,53,82,.7)}
+  .brand .eyebrow{font-size:9.5px}.brand h1{font-size:20px;margin:2px 0 0}.logo{grid-template-columns:repeat(2,8px);gap:3px}.logo i{width:8px;height:8px}
+  .workspace{display:block}.sidebar{display:none}
+  .tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:60;padding:6px 6px calc(6px + env(safe-area-inset-bottom));background:rgba(8,13,25,.92);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-top:1px solid var(--border)}
+  .sheet,.sheet-backdrop{display:block}
+  .toast-host{left:14px;right:14px;bottom:calc(88px + env(safe-area-inset-bottom))}
+  .monitor{height:300px;font-size:11px;padding:10px}.monitor .ts{margin-right:7px}
+}
+@media(max-width:360px){.sheet-grid{grid-template-columns:repeat(3,1fr)}}
 )CSS";
 
 const char APP_JS[] PROGMEM = R"JS(const $=q=>document.querySelector(q), $$=q=>[...document.querySelectorAll(q)];
@@ -258,21 +347,11 @@ function modal(title,body,ok='Aceptar',cancel='Cancelar'){return new Promise(res
 host.innerHTML=`
 <div class="shell">
  <header class="topbar">
-  <div class="brand"><div class="eyebrow">ESP32-WROVER · HUB75 · 64×64</div><h1>Matrix Studio</h1></div>
-  <div class="row-wrap"><div class="pill"><span class="dot"></span><span id="connectionText">matrix.local</span></div></div>
+  <div class="brand-row"><div class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="brand"><div class="eyebrow">ESP32-WROVER · HUB75 · 64×64</div><h1>Matrix Studio</h1></div></div>
  </header>
  <div class="workspace">
   <aside class="sidebar">
-   <button class="nav-btn active" data-page="image">Imagen</button>
-   <button class="nav-btn" data-page="pixel">Pixel Art</button>
-   <button class="nav-btn" data-page="text">Texto</button>
-   <button class="nav-btn" data-page="clock">Modo reloj</button>
-   <button class="nav-btn" data-page="library">Biblioteca</button>
-   <button class="nav-btn" data-page="gallery">Galería</button>
-   <button class="nav-btn" data-page="gifs">GIF's</button>
-   <button class="nav-btn" data-page="admin">Admin SD</button>
-   <button class="nav-btn" data-page="firmware">Firmware</button>
-   <button class="nav-btn" data-page="panel">Panel</button>
+   <nav id="sideNav" aria-label="Secciones"></nav>
    <div class="card mt-3" style="padding:12px;box-shadow:none">
     <div class="text-xs muted">Brillo global</div>
     <div class="quick-range mt-2"><input id="globalBrightness" type="range" min="1" max="255" value="20"><span id="globalBrightnessValue">20</span></div>
@@ -381,12 +460,97 @@ host.innerHTML=`
    </section>
    <section class="page" id="page-admin"><div class="page-head"><div><h2>Admin SD</h2><p>Gestiona archivos sin desmontar el display.</p></div></div><div class="card"><div class="row-wrap"><input class="input" style="max-width:420px" id="adminPath" value="/www"><button class="btn" id="listFiles">Listar</button><button class="btn" id="mkdir">Crear carpeta</button></div><label class="file-picker mt-3" for="adminUpload"><span class="file-button">Elegir archivos</span><span class="file-name" id="adminFileName">Ningún archivo</span></label><input class="file-native" id="adminUpload" type="file" multiple><button class="btn btn-green mt-3" id="uploadFiles">Subir a carpeta actual</button><div class="mt-4" id="fileList"></div></div></section>
    <section class="page" id="page-firmware"><div class="page-head"><div><h2>Firmware OTA</h2><p>Actualiza el ESP32 desde el navegador.</p></div></div><div class="card"><label class="file-picker" for="fwFile"><span class="file-button">Elegir .bin</span><span class="file-name" id="fwFileName">Ningún firmware</span></label><input class="file-native" id="fwFile" type="file" accept=".bin,application/octet-stream"><button class="btn btn-primary mt-4" id="fwUpload">Instalar firmware</button></div></section>
-   <section class="page" id="page-panel"><div class="page-head"><div><h2>Panel</h2><p>Estado y ajustes del sistema.</p></div></div><div class="card"><div class="stats" id="stats"></div><label class="field mt-4">Brillo<div class="quick-range mt-2"><input id="brightness" type="range" min="1" max="255" value="20"><span id="brightnessValue">20</span></div></label></div></section>
+   <section class="page" id="page-panel"><div class="page-head"><div><h2>Panel</h2><p>Ajustes del panel LED.</p></div></div><div class="card"><label class="field">Brillo<div class="quick-range mt-2"><input id="brightness" type="range" min="1" max="255" value="20"><span id="brightnessValue">20</span></div></label></div></section>
+   <section class="page" id="page-status">
+    <div class="page-head"><div><h2>Estado</h2><p>Salud del ESP32 en vivo y monitor de eventos: lo mismo que ves en el Monitor Serie.</p></div><span class="pill"><span class="dot" id="statusDot"></span><span id="statusConn">Conectando…</span></span></div>
+    <div class="status-grid" id="statusGrid"><div class="muted">Cargando…</div></div>
+    <div class="card mt-3">
+     <div class="monitor-head"><div class="card-title" style="margin:0">Monitor serie</div><div class="toolbar"><button class="btn" id="logPause">Pausar</button><button class="btn" id="logClear">Limpiar</button><button class="btn" id="logCopy">Copiar</button></div></div>
+     <div class="monitor mt-3" id="logBox"></div>
+    </div>
+   </section>
   </main>
+ </div>
+ <nav class="tabbar" id="tabbar" aria-label="Secciones"></nav>
+ <div class="sheet-backdrop" id="sheetBackdrop"></div>
+ <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Todas las secciones">
+  <div class="sheet-handle"></div>
+  <div class="sheet-head"><h3>Secciones</h3><button class="sheet-close" id="sheetClose" aria-label="Cerrar">×</button></div>
+  <div class="sheet-bright"><div class="text-xs muted">Brillo del panel</div><div class="quick-range mt-2"><input id="sheetBrightness" type="range" min="1" max="255" value="20"><span id="sheetBrightnessValue">20</span></div></div>
+  <div id="sheetBody"></div>
  </div>
 </div>`;
 
-$$('.nav-btn').forEach(b=>b.onclick=()=>{$$('.nav-btn').forEach(x=>x.classList.remove('active'));$$('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#page-'+b.dataset.page).classList.add('active');if(b.dataset.page==='gallery')loadGallery();if(b.dataset.page==='gifs')loadGifs();if(b.dataset.page==='admin')listFiles();if(b.dataset.page==='panel')loadStatus();if(b.dataset.page==='clock'){loadClockStatus();renderClockPreview()}});
+// ---- Navigation ----
+// One NAV list drives the desktop sidebar, the mobile bottom tab bar and the
+// "Más" bottom sheet. Sections are reachable by URL hash, so the phone's back
+// button moves between sections (and closes the sheet first when it is open).
+const ICONS={
+  image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  pixel:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  text:'<path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/>',
+  gifs:'<rect x="2" y="5" width="20" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  gallery:'<rect x="7" y="7" width="14" height="14" rx="2"/><path d="M3 17V5a2 2 0 0 1 2-2h12"/>',
+  library:'<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+  status:'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  panel:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  admin:'<path d="M7 2h8l4 4v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><path d="M9 6v3M12 6v3M15 7v2"/>',
+  firmware:'<path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/>',
+  more:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>'
+};
+const icon=n=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+const NAV=[
+  {id:'image',label:'Imagen',group:'Crear'},
+  {id:'pixel',label:'Pixel Art',group:'Crear'},
+  {id:'text',label:'Texto',group:'Crear'},
+  {id:'gifs',label:"GIF's",group:'Crear'},
+  {id:'clock',label:'Modo reloj',short:'Reloj',group:'Mostrar'},
+  {id:'gallery',label:'Galería',group:'Mostrar'},
+  {id:'library',label:'Biblioteca',group:'Mostrar'},
+  {id:'status',label:'Estado',group:'Sistema'},
+  {id:'panel',label:'Panel',group:'Sistema'},
+  {id:'admin',label:'Admin SD',group:'Sistema'},
+  {id:'firmware',label:'Firmware',group:'Sistema'}
+];
+const TABS=['image','text','gifs','clock'],GROUPS=['Crear','Mostrar','Sistema'];
+const navDot=id=>id==='status'?'<span class="nav-dot"></span>':'';
+$('#sideNav').innerHTML=GROUPS.map(g=>`<div class="nav-group">${g}</div>`+NAV.filter(n=>n.group===g).map(n=>`<button class="nav-btn" data-page="${n.id}">${icon(n.id)}<span>${n.label}</span>${navDot(n.id)}</button>`).join('')).join('');
+$('#tabbar').innerHTML=TABS.map(id=>{const n=NAV.find(x=>x.id===id);return `<button class="tab" data-page="${id}"><span class="ic">${icon(id)}</span><span>${n.short||n.label}</span></button>`}).join('')+`<button class="tab" id="tabMore" aria-haspopup="dialog"><span class="ic">${icon('more')}<span class="tab-badge hidden" id="moreBadge"></span></span><span>Más</span></button>`;
+$('#sheetBody').innerHTML=GROUPS.map(g=>`<div class="sheet-group">${g}</div><div class="sheet-grid">`+NAV.filter(n=>n.group===g).map(n=>`<button class="tile" data-page="${n.id}">${icon(n.id)}<span>${n.label}</span>${navDot(n.id)}</button>`).join('')+'</div>').join('');
+
+let currentPage=null,sheetOpen=false,sheetOpenedAt=0;
+const PAGE_HOOKS={gallery:()=>loadGallery(),gifs:()=>loadGifs(),admin:()=>listFiles(),clock:()=>{loadClockStatus();renderClockPreview()},status:()=>statusStart()};
+function go(page){
+  if(!$('#page-'+page))page='image';
+  const changed=page!==currentPage;currentPage=page;
+  $$('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+page));
+  $$('.nav-btn,.tab,.tile').forEach(x=>{const on=x.dataset.page===page;x.classList.toggle('active',on);if(on)x.setAttribute('aria-current','page');else x.removeAttribute('aria-current')});
+  $('#tabMore').classList.toggle('active',!TABS.includes(page));
+  if(page!=='status')statusStop();
+  if(changed)window.scrollTo(0,0);
+  try{localStorage.setItem('ms.page',page)}catch(e){}
+  const h=PAGE_HOOKS[page];if(h)h();
+}
+function nav(page){
+  if(sheetOpen){hideSheet();history.replaceState(null,'','#'+page)}
+  else if(page!==currentPage)history.pushState(null,'','#'+page);
+  go(page);
+}
+function showSheet(){if(sheetOpen)return;sheetOpen=true;sheetOpenedAt=Date.now();$('#sheet').classList.add('open');$('#sheetBackdrop').classList.add('open');document.body.classList.add('no-scroll');history.pushState({sheet:1},'',location.href)}
+function hideSheet(){sheetOpen=false;const sh=$('#sheet');sh.classList.remove('open');sh.style.transform='';$('#sheetBackdrop').classList.remove('open');document.body.classList.remove('no-scroll')}
+// Ignores the ghost click a tap can fire right after opening the sheet.
+function closeSheet(){if(!sheetOpen||Date.now()-sheetOpenedAt<400)return;hideSheet();if(history.state&&history.state.sheet)history.back()}
+document.addEventListener('click',e=>{const b=e.target.closest('.nav-btn,.tab[data-page],.tile');if(b&&b.dataset.page)nav(b.dataset.page)});
+$('#tabMore').onclick=showSheet;
+$('#sheetBackdrop').onclick=closeSheet;$('#sheetClose').onclick=closeSheet;
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeSheet()});
+window.addEventListener('popstate',()=>{if(sheetOpen){hideSheet();return}const p=location.hash.slice(1)||'image';if(p!==currentPage)go(p)});
+(()=>{const sh=$('#sheet');let y0=null,dy=0;
+  sh.addEventListener('touchstart',e=>{if(sh.scrollTop>0){y0=null;return}y0=e.touches[0].clientY;dy=0;sh.style.transition='none'},{passive:true});
+  sh.addEventListener('touchmove',e=>{if(y0===null)return;dy=Math.max(0,e.touches[0].clientY-y0);sh.style.transform=`translateY(${dy}px)`},{passive:true});
+  sh.addEventListener('touchend',()=>{if(y0===null)return;sh.style.transition='';y0=null;if(dy>90)closeSheet();else sh.style.transform=''});
+})();
 
 function black(ctx){ctx.fillStyle='#000';ctx.fillRect(0,0,64,64)}
 function to565(canvas){const d=canvas.getContext('2d',{willReadFrequently:true}).getImageData(0,0,64,64).data,o=new Uint8Array(8192);for(let p=0;p<4096;p++){let i=p*4,v=((d[i]&248)<<8)|((d[i+1]&252)<<3)|(d[i+2]>>3);o[p*2]=(v>>8)&255;o[p*2+1]=v&255}return o}
@@ -396,8 +560,9 @@ async function sendRawFrame(bytes){return uploadXHR('/api/frame','frame',new Blo
 async function saveFrame(bytes){await sendRawFrame(bytes);const v=await modal('Guardar en microSD','<label class="field">Nombre<input class="input" name="name" value="imagen"></label>','Guardar');if(!v)return;showLoader('Guardando','Escribiendo en microSD…',70);const r=await fetch('/api/gallery/save-image?name='+encodeURIComponent(v.name),{method:'POST'});hideLoader();if(!r.ok)throw Error(await r.text());toast('Guardado en microSD')}
 
 // BRIGHTNESS
-let brightnessTimer=null;function setBrightness(v){$('#globalBrightnessValue').textContent=v;$('#brightnessValue').textContent=v;$('#clockBrightnessValue').textContent=v;$('#globalBrightness').value=v;$('#brightness').value=v;$('#clockBrightness').value=v;clearTimeout(brightnessTimer);brightnessTimer=setTimeout(()=>fetch('/api/brightness?v='+v,{method:'POST'}),100)}
-['globalBrightness','brightness','clockBrightness'].forEach(id=>$('#'+id).oninput=e=>setBrightness(e.target.value));
+const BRIGHT_IDS=['globalBrightness','brightness','clockBrightness','sheetBrightness'];
+let brightnessTimer=null;function setBrightness(v){BRIGHT_IDS.forEach(id=>{$('#'+id).value=v;$('#'+id+'Value').textContent=v});clearTimeout(brightnessTimer);brightnessTimer=setTimeout(()=>fetch('/api/brightness?v='+v,{method:'POST'}),100)}
+BRIGHT_IDS.forEach(id=>$('#'+id).oninput=e=>setBrightness(e.target.value));
 
 // IMAGE
 const ic=$('#imgCanvas'),ix=ic.getContext('2d');black(ix);let img=null;
@@ -462,7 +627,55 @@ $('#importPixilart').onclick=async()=>{const url=$('#pixilartUrl').value.trim();
 async function loadGallery(){const box=$('#galleryList');box.innerHTML='<div class="muted">Cargando…</div>';const r=await fetch('/api/gallery');const d=await r.json();box.innerHTML='';const all=[...(d.images||[]).map(x=>({...x,type:'image'})),...(d.animations||[]).map(x=>({...x,type:'animation'}))];if(!all.length){box.innerHTML='<div class="muted">Sin contenido.</div>';return}for(const it of all){const e=document.createElement('div');e.className='library-card';e.innerHTML=`<div class="font-bold">${it.name}</div><div class="muted text-xs mt-1">${it.type} · ${it.size} B</div><div class="toolbar mt-3"><button class="btn play">${it.type==='image'?'Mostrar':'Reproducir'}</button><button class="btn btn-danger del">Eliminar</button></div>`;e.querySelector('.play').onclick=()=>fetch((it.type==='image'?'/api/gallery/show-image?name=':'/api/gallery/play-animation?name=')+encodeURIComponent(it.name),{method:'POST'});e.querySelector('.del').onclick=async()=>{const v=await modal('Eliminar',`¿Eliminar <b>${it.name}</b>?`,'Eliminar');if(v!==null){await fetch('/api/gallery/delete?type='+it.type+'&name='+encodeURIComponent(it.name),{method:'DELETE'});loadGallery()}};box.appendChild(e)}}$('#reloadGallery').onclick=loadGallery;
 $('#adminUpload').onchange=e=>$('#adminFileName').textContent=[...e.target.files].map(f=>f.name).join(', ')||'Ningún archivo';async function listFiles(){const path=$('#adminPath').value||'/';const r=await fetch('/api/fs/list?path='+encodeURIComponent(path));const d=await r.json();let h='<table class="table"><tr><th>Nombre</th><th>Tipo</th><th>Tamaño</th><th></th></tr>';for(const it of d.items)h+=`<tr><td>${it.name}</td><td>${it.dir?'carpeta':'archivo'}</td><td>${it.dir?'':it.size}</td><td><button class="btn btn-danger fdel" data-path="${it.path}">Eliminar</button></td></tr>`;h+='</table>';$('#fileList').innerHTML=h;$$('.fdel').forEach(b=>b.onclick=async()=>{const v=await modal('Eliminar',`¿Eliminar <b>${b.dataset.path}</b>?`,'Eliminar');if(v!==null){await fetch('/api/fs/delete?path='+encodeURIComponent(b.dataset.path),{method:'DELETE'});listFiles()}})}$('#listFiles').onclick=listFiles;$('#mkdir').onclick=async()=>{const v=await modal('Crear carpeta','<label class="field">Nombre<input class="input" name="name"></label>','Crear');if(!v)return;const base=$('#adminPath').value.replace(/\/$/,'');await fetch('/api/fs/mkdir?path='+encodeURIComponent(base+'/'+v.name),{method:'POST'});listFiles()};$('#uploadFiles').onclick=async()=>{const files=[...$('#adminUpload').files];if(!files.length)return toast('Selecciona archivos','err');const base=$('#adminPath').value.replace(/\/$/,'');showLoader('Subiendo archivos','Preparando…',5);try{let i=0;for(const f of files){i++;await uploadXHR('/api/fs/upload?path='+encodeURIComponent(base+'/'+f.name),'file',f,f.name,`Subiendo ${i}/${files.length}`)}hideLoader();toast('Archivos subidos');listFiles()}catch(e){hideLoader();toast(e.message,'err')}};
 $('#fwFile').onchange=e=>$('#fwFileName').textContent=e.target.files[0]?.name||'Ningún firmware';$('#fwUpload').onclick=async()=>{const f=$('#fwFile').files[0];if(!f)return toast('Selecciona un .bin','err');const v=await modal('Actualizar firmware',`Se instalará <b>${f.name}</b> y el ESP32 reiniciará. No desconectes alimentación.`,'Instalar');if(v===null)return;try{await uploadXHR('/api/firmware','firmware',f,f.name,'Actualizando firmware');toast('Firmware instalado; reiniciando…');setTimeout(()=>location.href='http://matrix.local',9000)}catch(e){toast(e.message,'err')}};
-async function loadStatus(){try{const s=await (await fetch('/api/status')).json();$('#connectionText').textContent=`${s.ip} · ${s.rssi??'?'} dBm`;$('#stats').innerHTML=`<div class="stat"><div class="v">${s.ip}</div><div class="k">IP</div></div><div class="stat"><div class="v">${s.rssi??'?'} dBm</div><div class="k">Wi-Fi</div></div><div class="stat"><div class="v">${s.sdUsedMB??'?'} / ${s.sdTotalMB??'?'} MB</div><div class="k">microSD</div></div><div class="stat"><div class="v">${s.lastRenderMs??'?'} ms</div><div class="k">Último render</div></div>`}catch{$('#connectionText').textContent='sin conexión'}}loadStatus();setInterval(loadStatus,10000);loadClockStatus();
+// ---- Estado ----
+// Live status (/api/status every 3 s) and the serial monitor (/api/log every
+// 1.5 s) poll only while the Estado page is open. Elsewhere a 10 s heartbeat
+// keeps the online/offline dot in the navigation up to date.
+let statusTimer=null,logTimer=null,logSince=0,logPaused=false,logLines=[];
+const fmtBytes=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';
+const fmtUptime=s=>{const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),x=s%60;return (d?d+'d ':'')+[h,m,x].map(v=>String(v).padStart(2,'0')).join(':')};
+const fmtMs=ms=>fmtUptime(Math.floor(ms/1000))+'.'+String(ms%1000).padStart(3,'0');
+const signal=r=>r>=-55?'Excelente':r>=-67?'Buena':r>=-75?'Regular':'Débil';
+const esc=t=>String(t??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function setOnline(on){$$('.nav-dot').forEach(d=>d.classList.toggle('off',!on));$('#moreBadge').classList.toggle('hidden',on);$('#statusConn').textContent=on?'En línea':'Sin conexión';$('#statusDot').classList.toggle('off',!on)}
+async function loadStatus(){try{const s=await (await fetch('/api/status',{cache:'no-store'})).json();setOnline(true);renderStatus(s);return s}catch(e){setOnline(false);return null}}
+const meter=p=>`<div class="meter"><span style="width:${Math.max(0,Math.min(100,p))}%"></span></div>`;
+function showingText(s){if(s.stateKind==='frame')return 'Imagen fija';if(s.stateKind==='anim')return (s.stateAnim.includes('/gifs/')?'GIF':'Animación')+' · '+s.stateAnim.split('/').pop().replace(/\.pma$/,'');if(s.stateKind==='clock')return 'Modo reloj';return 'Pantalla inicial'}
+function renderStatus(s){
+  if(!$('#page-status').classList.contains('active'))return;
+  const row=(k,v)=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+  const card=(t,ic,body)=>`<div class="card status-card"><div class="status-title">${icon(ic)}<span>${t}</span></div>${body}</div>`;
+  const sdPct=s.sdTotalMB?s.sdUsedMB/s.sdTotalMB*100:0,heapPct=s.heapSize?(s.heapSize-s.heapFree)/s.heapSize*100:0,fwPct=s.sketchFree?s.sketchSize/s.sketchFree*100:0;
+  $('#statusGrid').innerHTML=
+    card('Conexión','status',row('IP',esc(s.ip))+row('Red Wi-Fi',esc(s.ssid||'—'))+row('Señal',`${s.rssi} dBm · ${signal(s.rssi)}`)+row('mDNS',esc(s.host))+row('MAC',esc(s.mac)))+
+    card('Pantalla','image',row('Mostrando',esc(showingText(s)))+(s.animPlaying?row('Frames',s.animFrames):'')+row('Brillo',s.brightness)+row('Reloj',s.clockEnabled?'Activo':'Inactivo')+row('Último render',s.lastRenderMs+' ms'))+
+    card('Sistema','panel',row('Encendido hace',fmtUptime(s.uptimeS))+row('Último reinicio',esc(s.resetReason))+row('RAM libre',`${fmtBytes(s.heapFree)} de ${fmtBytes(s.heapSize)}`)+meter(heapPct)+row('RAM mínima',fmtBytes(s.heapMin))+row('PSRAM libre',s.psramSize?`${fmtBytes(s.psramFree)} de ${fmtBytes(s.psramSize)}`:'No detectada')+row('Chip',`${esc(s.chip)} · ${s.cpuMHz} MHz`))+
+    card('Almacenamiento','admin',row('microSD',`${s.sdUsedMB} / ${s.sdTotalMB} MB`)+meter(sdPct)+row('Firmware',`${fmtBytes(s.sketchSize)} de ${fmtBytes(s.sketchFree)} (slot OTA)`)+meter(fwPct)+row('Web assets','v'+esc(s.webVersion))+row('Compilado',esc(s.build)))+
+    card('Clima','clock',s.weatherValid?row('Temperatura',s.temp+' °C')+row('Humedad',s.humidity+'%'):row('Estado','Sin datos todavía'));
+}
+const logClass=m=>/ERROR|fallido|panic/i.test(m)?'err':/ADVERTENCIA|perdido|reinici/i.test(m)?'warn':/ OK|listo|correctamente|restaurado|reconectado|instalado|actualizado/i.test(m)?'ok':'';
+function renderLog(){
+  const box=$('#logBox'),atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<40;
+  box.innerHTML=logLines.length?logLines.map(l=>`<div class="ln ${l.c}">${l.t===null?'':`<span class="ts">${fmtMs(l.t)}</span>`}${esc(l.m)||'&nbsp;'}</div>`).join(''):'<div class="ts">Esperando mensajes del ESP32…</div>';
+  if(atBottom)box.scrollTop=box.scrollHeight;
+}
+async function pollLog(){
+  if(logPaused)return;
+  try{
+    const d=await (await fetch('/api/log?since='+logSince,{cache:'no-store'})).json();
+    if(d.next<logSince){logSince=0;logLines.push({t:null,m:'— El ESP32 se reinició —',c:'warn'});renderLog();return pollLog()}
+    for(const l of d.lines){logLines.push({t:l.t,m:l.m,c:logClass(l.m)});logSince=l.s+1}
+    if(logLines.length>400)logLines.splice(0,logLines.length-400);
+    renderLog();
+  }catch(e){}
+}
+function statusStart(){statusStop();renderLog();loadStatus();pollLog();statusTimer=setInterval(loadStatus,3000);logTimer=setInterval(pollLog,1500)}
+function statusStop(){clearInterval(statusTimer);clearInterval(logTimer);statusTimer=logTimer=null}
+function copyText(t){const fallback=()=>{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');toast('Log copiado')}catch(e){toast('No se pudo copiar','err')}ta.remove()};if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(t).then(()=>toast('Log copiado'),fallback);else fallback()}
+$('#logPause').onclick=()=>{logPaused=!logPaused;$('#logPause').textContent=logPaused?'Reanudar':'Pausar';if(!logPaused)pollLog()};
+$('#logClear').onclick=()=>{logLines=[];renderLog()};
+$('#logCopy').onclick=()=>copyText(logLines.map(l=>(l.t===null?'':'['+fmtMs(l.t)+'] ')+l.m).join('\n'));
+loadClockStatus();
 
 // ---- GIF's ----
 // GIFs are decoded in the browser with a self-contained GIF89a decoder (LZW +
@@ -657,6 +870,11 @@ async function loadGifs(){
 $('#gifReload').onclick=loadGifs;
 $('#gifLoad').onclick=async()=>{if(!gifSelected)return;try{const r=await fetch('/api/gifs/play?name='+encodeURIComponent(gifSelected),{method:'POST'});if(!r.ok)throw Error('No se pudo cargar');toast('GIF cargado al panel')}catch(e){toast(e.message,'err')}};
 $('#gifDelete').onclick=async()=>{if(!gifSelected)return;const v=await modal('Borrar GIF',`¿Eliminar <b>${gifSelected}</b> de la microSD?`,'Borrar');if(v!==null){await fetch('/api/gifs/delete?name='+encodeURIComponent(gifSelected),{method:'DELETE'});loadGifs()}};
+
+// ---- Start ----
+go(location.hash.slice(1)||(()=>{try{return localStorage.getItem('ms.page')}catch(e){return null}})()||'image');
+history.replaceState(null,'','#'+currentPage);
+loadStatus();setInterval(()=>{if(currentPage!=='status')loadStatus()},10000);
 )JS";
 
 // =========================
@@ -694,7 +912,7 @@ bool writeText(const char* path, const char* src){
   f.close(); return true;
 }
 
-const char* WEB_ASSET_VERSION = "5.5";
+const char* WEB_ASSET_VERSION = "5.6";
 
 void provisionWeb(){
   ensureDir(WWW_DIR);
@@ -721,11 +939,11 @@ void provisionWeb(){
     !SD_MMC.exists("/www/app.js");
 
   if (!needsUpdate) {
-    Serial.println("Web assets OK: v" + installedVersion);
+    Log.println("Web assets OK: v" + installedVersion);
     return;
   }
 
-  Serial.println("Actualizando web assets en microSD a v" + String(WEB_ASSET_VERSION));
+  Log.println("Actualizando web assets en microSD a v" + String(WEB_ASSET_VERSION));
 
   SD_MMC.remove("/www/index.html");
   SD_MMC.remove("/www/app.css");
@@ -744,9 +962,9 @@ void provisionWeb(){
       vf.print(WEB_ASSET_VERSION);
       vf.close();
     }
-    Serial.println("Web assets actualizados correctamente.");
+    Log.println("Web assets actualizados correctamente.");
   } else {
-    Serial.println("ERROR actualizando web assets.");
+    Log.println("ERROR actualizando web assets.");
   }
 }
 
@@ -870,6 +1088,9 @@ void fetchWeather() {
     weatherFeelsC = f;
     weatherCode = wc;
     weatherValid = true;
+    Log.println("Clima actualizado: " + String(t, 1) + " C, " + String(h, 0) + "% humedad");
+  } else {
+    Log.println("ERROR clima: HTTP " + String(code));
   }
   http.end();
 }
@@ -1105,9 +1326,9 @@ void saveState(){
   j += ",\"cWeatherColor\":" + String(clockCfg.weatherColor);
   j += "}";
   if (writeAtomic(STATE_PATH, STATE_TMP, (const uint8_t*)j.c_str(), j.length())) {
-    Serial.println("Estado guardado: " + (stateKind.length() ? stateKind : String("(vacio)")));
+    Log.println("Estado guardado: " + (stateKind.length() ? stateKind : String("(vacio)")));
   } else {
-    Serial.println("ERROR guardando estado en microSD");
+    Log.println("ERROR guardando estado en microSD");
   }
 }
 
@@ -1143,7 +1364,7 @@ void restoreState(){
   String j;
   File sf = openWithFallback(STATE_PATH, STATE_TMP);
   if (sf) { j = sf.readString(); sf.close(); }
-  if (!j.length()) { Serial.println("Sin estado guardado: pantalla inicial"); showSplash(); return; }
+  if (!j.length()) { Log.println("Sin estado guardado: pantalla inicial"); showSplash(); return; }
 
   uint8_t b = (uint8_t)constrain((int)jsonNumber(j, "brightness", 20), 1, 255);
   clockCfg.brightness = b;
@@ -1154,14 +1375,14 @@ void restoreState(){
     File ff = openWithFallback(LAST_FRAME_PATH, LAST_FRAME_TMP);
     if (ff && ff.size() == FRAME_BYTES && ff.read(frameBuffer, FRAME_BYTES) == FRAME_BYTES) {
       ff.close(); applyFrame(); stateKind = kind;
-      Serial.println("Estado restaurado: frame"); return;
+      Log.println("Estado restaurado: frame"); return;
     }
     if (ff) ff.close();
   } else if (kind == "anim") {
     String p = jsonString(j, "anim");
     if (p.length() && playAnim(p)) {
       stateKind = kind; stateAnim = p;
-      Serial.println("Estado restaurado: animacion " + p); return;
+      Log.println("Estado restaurado: animacion " + p); return;
     }
   } else if (kind == "clock") {
     clockCfg.mode = constrain((int)jsonNumber(j, "cMode", 0), 0, 4);
@@ -1182,9 +1403,9 @@ void restoreState(){
     lastClockDraw = 0;
     renderClock();
     stateKind = kind;
-    Serial.println("Estado restaurado: reloj"); return;
+    Log.println("Estado restaurado: reloj"); return;
   }
-  Serial.println("Estado '" + kind + "' no restaurable: pantalla inicial");
+  Log.println("Estado '" + kind + "' no restaurable: pantalla inicial");
   showSplash();
 }
 
@@ -1201,7 +1422,12 @@ void connectWiFi(){
 }
 void serviceWiFi(){
   if(millis()-lastWifiCheck<5000)return;lastWifiCheck=millis();
-  if(WiFi.status()==WL_CONNECTED){if(!mdnsReady)startMDNS();return;}
+  static bool wasConnected=true;
+  if(WiFi.status()==WL_CONNECTED){
+    if(!wasConnected){wasConnected=true;Log.println("Wi-Fi reconectado: "+WiFi.localIP().toString());}
+    if(!mdnsReady)startMDNS();return;
+  }
+  if(wasConnected){wasConnected=false;Log.println("Wi-Fi perdido, reconectando...");}
   mdnsReady=false;WiFi.disconnect();WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
 }
 
@@ -1227,7 +1453,7 @@ void genericUpload(){
   }else if(u.status==UPLOAD_FILE_WRITE){
     if(!uploadFile||uploadFile.write(u.buf,u.currentSize)!=u.currentSize)uploadOK=false;
     
-  }else if(u.status==UPLOAD_FILE_END){if(uploadFile)uploadFile.close();}
+  }else if(u.status==UPLOAD_FILE_END){if(uploadFile){Log.println(String("Archivo guardado: ")+uploadFile.path()+" ("+String((uint32_t)u.totalSize)+" B)");uploadFile.close();}}
   else if(u.status==UPLOAD_FILE_ABORTED){if(uploadFile)uploadFile.close();uploadOK=false;}
 }
 
@@ -1236,6 +1462,7 @@ void firmwareUpload(){
   if(u.status==UPLOAD_FILE_START){
     otaSuccess=false; otaError="";
     stopAnim();
+    Log.println("OTA: recibiendo firmware...");
     if(!Update.begin(UPDATE_SIZE_UNKNOWN)){otaError=Update.errorString();}
   }else if(u.status==UPLOAD_FILE_WRITE){
     if(otaError.length()==0 && Update.write(u.buf,u.currentSize)!=u.currentSize)otaError=Update.errorString();
@@ -1287,6 +1514,32 @@ String gifsJson(){
   j+="]}";return j;
 }
 
+String jsonEsc(const String& in){
+  String o; o.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if ((uint8_t)c < 0x20) { char b[7]; snprintf(b, sizeof(b), "\\u%04x", (uint8_t)c); o += b; }
+    else o += c;
+  }
+  return o;
+}
+
+const char* resetReasonText(){
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "Encendido / corte de energia";
+    case ESP_RST_SW: return "Reinicio por software (OTA)";
+    case ESP_RST_PANIC: return "Fallo del firmware (panic)";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "Watchdog";
+    case ESP_RST_BROWNOUT: return "Bajo voltaje (brownout)";
+    case ESP_RST_EXT: return "Boton reset";
+    case ESP_RST_DEEPSLEEP: return "Deep sleep";
+    default: return "Desconocido";
+  }
+}
+
 void setupServer(){
   server.on("/",HTTP_GET,[]{
     server.sendHeader("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");
@@ -1309,7 +1562,7 @@ void setupServer(){
     if(!serveFile("/www/app.js"))server.send(404,"text/plain","No JS");
   });
 
-  server.on("/api/frame",HTTP_POST,[]{if(uploadOK&&uploadBytes==FRAME_BYTES){applyFrame();markState("frame");String j="{\"ok\":true,\"renderMs\":"+String(lastRenderMs)+"}";server.send(200,"application/json",j);}else server.send(400,"text/plain","Frame invalido");},frameUpload);
+  server.on("/api/frame",HTTP_POST,[]{if(uploadOK&&uploadBytes==FRAME_BYTES){applyFrame();markState("frame");Log.println("Frame recibido: render "+String(lastRenderMs)+" ms");String j="{\"ok\":true,\"renderMs\":"+String(lastRenderMs)+"}";server.send(200,"application/json",j);}else server.send(400,"text/plain","Frame invalido");},frameUpload);
 
 
   server.on("/api/brightness", HTTP_POST, [](){
@@ -1341,12 +1594,14 @@ void setupServer(){
     lastClockDraw = 0;
     renderClock();
     markState("clock");
+    Log.println("Modo reloj activado (diseno " + String(clockCfg.mode) + ")");
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
   server.on("/api/clock/stop", HTTP_POST, [](){
     stopClock();
     markState("idle");
+    Log.println("Modo reloj desactivado");
     server.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -1380,10 +1635,10 @@ void setupServer(){
   server.on("/api/gallery/show-image",HTTP_POST,[]{
     String p=String(IMAGE_DIR)+"/"+safeName(server.arg("name"));File f=SD_MMC.open(p,FILE_READ);
     if(!f||f.size()!=FRAME_BYTES){server.send(404,"text/plain","No encontrado");return;}
-    f.read(frameBuffer,FRAME_BYTES);f.close();stopClock();stopAnim();applyFrame();markState("frame");server.send(200,"application/json","{\"ok\":true}");
+    f.read(frameBuffer,FRAME_BYTES);f.close();stopClock();stopAnim();applyFrame();markState("frame");Log.println("Mostrando imagen: "+p);server.send(200,"application/json","{\"ok\":true}");
   });
   server.on("/api/gallery/play-animation",HTTP_POST,[]{
-    String p=String(ANIM_DIR)+"/"+safeName(server.arg("name"));if(!playAnim(p))server.send(400,"text/plain","Animacion invalida");else{markState("anim",p);server.send(200,"application/json","{\"ok\":true}");}
+    String p=String(ANIM_DIR)+"/"+safeName(server.arg("name"));if(!playAnim(p))server.send(400,"text/plain","Animacion invalida");else{markState("anim",p);Log.println("Reproduciendo: "+p);server.send(200,"application/json","{\"ok\":true}");}
   });
   server.on("/api/gallery/delete",HTTP_DELETE,[]{
     String type=server.arg("type"),name=safeName(server.arg("name"));
@@ -1400,11 +1655,12 @@ void setupServer(){
   });
   server.on("/api/gifs/play",HTTP_POST,[]{
     String p=String(GIF_DIR)+"/"+safeName(server.arg("name"))+".pma";
-    if(!playAnim(p))server.send(400,"text/plain","GIF invalido");else{markState("anim",p);server.send(200,"application/json","{\"ok\":true}");}
+    if(!playAnim(p))server.send(400,"text/plain","GIF invalido");else{markState("anim",p);Log.println("Reproduciendo: "+p);server.send(200,"application/json","{\"ok\":true}");}
   });
   server.on("/api/gifs/delete",HTTP_DELETE,[]{
     String base=safeName(server.arg("name"));stopAnim();
     if(stateKind=="anim"&&stateAnim==String(GIF_DIR)+"/"+base+".pma")markState("idle");
+    Log.println("GIF borrado: "+base);
     SD_MMC.remove(String(GIF_DIR)+"/"+base+".gif");
     SD_MMC.remove(String(GIF_DIR)+"/"+base+".pma");
     server.send(200,"application/json","{\"ok\":true}");
@@ -1416,8 +1672,8 @@ void setupServer(){
   server.on("/api/fs/upload",HTTP_POST,[]{if(uploadOK)server.send(200,"application/json","{\"ok\":true}");else server.send(500,"text/plain","Upload fallido");},genericUpload);
 
   server.on("/api/firmware",HTTP_POST,[]{
-    if(otaSuccess){server.send(200,"text/plain","Firmware instalado. Reiniciando...");delay(500);ESP.restart();}
-    else server.send(500,"text/plain",otaError.length()?otaError:"Error OTA");
+    if(otaSuccess){Log.println("OTA: firmware instalado, reiniciando");server.send(200,"text/plain","Firmware instalado. Reiniciando...");delay(500);ESP.restart();}
+    else{Log.println("OTA ERROR: "+(otaError.length()?otaError:String("desconocido")));server.send(500,"text/plain",otaError.length()?otaError:"Error OTA");}
   },firmwareUpload);
 
 
@@ -1545,14 +1801,54 @@ void setupServer(){
     uint64_t total = SD_MMC.totalBytes();
     uint64_t used  = SD_MMC.usedBytes();
     String j = "{";
-    j += "\"host\":\"matrix.local\",";
+    j += "\"host\":\"" + String(MDNS_HOST) + ".local\",";
     j += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+    j += "\"ssid\":\"" + jsonEsc(WiFi.SSID()) + "\",";
+    j += "\"mac\":\"" + WiFi.macAddress() + "\",";
     j += "\"rssi\":" + String(WiFi.RSSI()) + ",";
     j += "\"sdTotalMB\":" + String((uint32_t)(total / 1048576ULL)) + ",";
     j += "\"sdUsedMB\":" + String((uint32_t)(used / 1048576ULL)) + ",";
     j += "\"lastRenderMs\":" + String(lastRenderMs) + ",";
-    j += "\"clockEnabled\":" + String(clockCfg.enabled ? "true" : "false");
+    j += "\"clockEnabled\":" + String(clockCfg.enabled ? "true" : "false") + ",";
+    j += "\"uptimeS\":" + String((uint32_t)(millis() / 1000)) + ",";
+    j += "\"resetReason\":\"" + String(resetReasonText()) + "\",";
+    j += "\"heapFree\":" + String(ESP.getFreeHeap()) + ",";
+    j += "\"heapMin\":" + String(ESP.getMinFreeHeap()) + ",";
+    j += "\"heapSize\":" + String(ESP.getHeapSize()) + ",";
+    j += "\"psramFree\":" + String(ESP.getFreePsram()) + ",";
+    j += "\"psramSize\":" + String(ESP.getPsramSize()) + ",";
+    j += "\"chip\":\"" + String(ESP.getChipModel()) + " rev " + String(ESP.getChipRevision()) + "\",";
+    j += "\"cpuMHz\":" + String(ESP.getCpuFreqMHz()) + ",";
+    j += "\"sketchSize\":" + String(ESP.getSketchSize()) + ",";
+    j += "\"sketchFree\":" + String(ESP.getFreeSketchSpace()) + ",";
+    j += "\"sdk\":\"" + jsonEsc(String(ESP.getSdkVersion())) + "\",";
+    j += "\"webVersion\":\"" + String(WEB_ASSET_VERSION) + "\",";
+    j += "\"build\":\"" __DATE__ " " __TIME__ "\",";
+    j += "\"stateKind\":\"" + stateKind + "\",";
+    j += "\"stateAnim\":\"" + jsonEsc(stateAnim) + "\",";
+    j += "\"animPlaying\":" + String(animationPlaying ? "true" : "false") + ",";
+    j += "\"animFrames\":" + String(animFrames) + ",";
+    j += "\"brightness\":" + String(clockCfg.brightness) + ",";
+    j += "\"weatherValid\":" + String(weatherValid ? "true" : "false") + ",";
+    j += "\"temp\":" + String(weatherTempC, 1) + ",";
+    j += "\"humidity\":" + String(weatherHumidityPct, 0);
     j += "}";
+    server.send(200,"application/json",j);
+  });
+
+  // Serial monitor for the web: lines with seq >= since. "next" is the seq to
+  // ask for next time; if it is lower than the client's since, the ESP rebooted.
+  server.on("/api/log",HTTP_GET,[](){
+    static LogLine buf[LOG_LINES];
+    uint32_t since = (uint32_t)server.arg("since").toInt();
+    int n = Log.snapshot(since, buf, LOG_LINES);
+    String j = "{\"next\":" + String(Log.nextSeq()) + ",\"lines\":[";
+    for (int i = 0; i < n; i++) {
+      if (i) j += ",";
+      j += "{\"s\":" + String(buf[i].seq) + ",\"t\":" + String(buf[i].ms) + ",\"m\":\"" + jsonEsc(String(buf[i].text)) + "\"}";
+    }
+    j += "]}";
+    server.sendHeader("Cache-Control","no-store");
     server.send(200,"application/json",j);
   });
 
@@ -1586,30 +1882,30 @@ void setup(){
   Serial.begin(115200);
   delay(300);
 
-  Serial.println();
-  Serial.println("=== Matrix Studio boot ===");
+  Log.println();
+  Log.println("=== Matrix Studio boot ===");
 
-  Serial.println("[1/5] Inicializando display...");
+  Log.println("[1/5] Inicializando display...");
   setupDisplay();
-  Serial.println("[1/5] Display OK");
+  Log.println("[1/5] Display OK");
 
-  Serial.println("[2/5] Montando microSD...");
+  Log.println("[2/5] Montando microSD...");
   setupSD();
-  Serial.println("[2/5] microSD OK");
+  Log.println("[2/5] microSD OK");
 
-  Serial.println("Restaurando ultimo estado del panel...");
+  Log.println("Restaurando ultimo estado del panel...");
   restoreState();
 
-  Serial.println("[3/5] Conectando Wi-Fi...");
+  Log.println("[3/5] Conectando Wi-Fi...");
   connectWiFi();
-  Serial.print("[3/5] Wi-Fi OK: ");
-  Serial.println(WiFi.localIP());
+  Log.print("[3/5] Wi-Fi OK: ");
+  Log.println(WiFi.localIP());
 
-  Serial.println("[4/5] Iniciando servidor HTTP...");
+  Log.println("[4/5] Iniciando servidor HTTP...");
   setupServer();
-  Serial.println("[4/5] Servidor HTTP OK");
+  Log.println("[4/5] Servidor HTTP OK");
 
-  Serial.println("[5/5] Iniciando tarea de clima...");
+  Log.println("[5/5] Iniciando tarea de clima...");
   BaseType_t weatherResult = xTaskCreatePinnedToCore(
     weatherTask,
     "weather",
@@ -1621,18 +1917,18 @@ void setup(){
   );
 
   if (weatherResult == pdPASS) {
-    Serial.println("[5/5] Clima OK");
+    Log.println("[5/5] Clima OK");
   } else {
     weatherTaskHandle = nullptr;
-    Serial.println("[5/5] ADVERTENCIA: no se pudo iniciar tarea de clima");
+    Log.println("[5/5] ADVERTENCIA: no se pudo iniciar tarea de clima");
   }
 
-  Serial.println("=== Matrix Studio listo ===");
-  Serial.print("mDNS: http://");
-  Serial.print(MDNS_HOST);
-  Serial.println(".local");
-  Serial.print("IP: http://");
-  Serial.println(WiFi.localIP());
+  Log.println("=== Matrix Studio listo ===");
+  Log.print("mDNS: http://");
+  Log.print(MDNS_HOST);
+  Log.println(".local");
+  Log.print("IP: http://");
+  Log.println(WiFi.localIP());
 }
 void loop(){
   serviceAnim();

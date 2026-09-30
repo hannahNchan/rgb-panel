@@ -2235,23 +2235,46 @@ Además, que una imagen sea pública no significa que sea libre de derechos. Deb
 
 ---
 
-# 47. `/api/status`
+# 47. `/api/status` y `/api/log` (página Estado)
 
-Entrega estado general:
+## `/api/status`
 
-```json
-{
-  "host": "matrix.local",
-  "ip": "192.168.x.x",
-  "rssi": -45,
-  "sdTotalMB": 15000,
-  "sdUsedMB": 25,
-  "lastRenderMs": 123,
-  "clockEnabled": false
-}
+Entrega el estado completo del equipo. Lo usa la página **Estado** (cada 3 s mientras está abierta) y un latido cada 10 s que pinta el punto verde/rojo de conexión en la navegación.
+
+```text
+Conexión   host, ip, ssid, mac, rssi
+Pantalla   stateKind, stateAnim, animPlaying, animFrames, brightness, clockEnabled, lastRenderMs
+Sistema    uptimeS, resetReason, heapFree, heapMin, heapSize, psramFree, psramSize, chip, cpuMHz, sdk
+Almacen.   sdTotalMB, sdUsedMB, sketchSize, sketchFree (tamaño del slot OTA), webVersion, build
+Clima      weatherValid, temp, humidity
 ```
 
-La página Panel lo utiliza para diagnóstico.
+`resetReason` traduce `esp_reset_reason()`: corte de energía, reinicio por software (OTA), watchdog, brownout, etc. Sirve para saber por qué se reinició el panel.
+
+## `/api/log?since=N`
+
+Monitor Serie en la web. Todo lo que el firmware imprime pasa por `Log` (un `Print` que escribe en `Serial` y además guarda la línea en un buffer circular de `LOG_LINES` = 80 líneas en RAM, protegido con spinlock porque la tarea del clima escribe desde el core 0).
+
+```json
+{ "next": 42, "lines": [ { "s": 40, "t": 12345, "m": "Frame recibido: render 9 ms" } ] }
+```
+
+- `s`: número de secuencia; el cliente pide `since = último s + 1`.
+- `t`: `millis()` del ESP32 al imprimir la línea (la web lo muestra como tiempo desde el arranque).
+- Si `next` es menor que el `since` del cliente, el ESP32 se reinició: la web lo marca y vuelve a pedir desde 0, así se ve el log de arranque.
+
+Además del arranque, se registran: frames recibidos, imagen/animación/GIF reproducidos, reloj activado/desactivado, archivos guardados, GIF borrado, estado guardado/restaurado, clima actualizado o con error, Wi-Fi perdido/reconectado y el progreso/resultado del OTA.
+
+---
+
+# 47.1 Navegación de la interfaz
+
+Una sola lista `NAV` en `app.js` genera las tres navegaciones, agrupadas en **Crear** (Imagen, Pixel Art, Texto, GIF's), **Mostrar** (Modo reloj, Galería, Biblioteca) y **Sistema** (Estado, Panel, Admin SD, Firmware):
+
+- **Escritorio**: sidebar con íconos y grupos.
+- **Celular y tablet (≤ 980 px)**: encabezado compacto fijo y **barra de pestañas inferior** con Imagen, Texto, GIF's, Reloj y **Más**. "Más" abre una hoja inferior con todas las secciones y el brillo rápido; se cierra tocando fuera, con la ×, deslizando hacia abajo o con el botón atrás.
+- Cada sección tiene su URL (`#gifs`, `#status`…): el botón atrás del teléfono navega entre secciones, y la última sección visitada se recuerda (`localStorage`).
+- Los sliders de brillo (sidebar, hoja, Panel y reloj) están sincronizados.
 
 ---
 
@@ -2266,7 +2289,7 @@ display.begin(32,...)
 display.setMuxPattern(BINARY)
 display.setScanPattern(LINE)
 display.setFastUpdate(false)
-display.setBrightness(80)
+display.setBrightness(20)
 display.clearDisplay(false)
 display.clearDisplay(true)
 startMatrixRefreshTask()
@@ -2754,16 +2777,9 @@ eliminar
 
 # 61. `loadStatus()`
 
-Consulta periódicamente `/api/status`.
+Consulta `/api/status`, pinta el punto de conexión de la navegación (verde en línea, rojo sin conexión) y, si la página **Estado** está abierta, redibuja sus tarjetas.
 
-Actualiza:
-
-- IP;
-- RSSI Wi-Fi;
-- espacio SD;
-- último render.
-
-Se ejecuta al cargar y luego cada 10 segundos.
+Se ejecuta al cargar, cada 10 segundos en segundo plano y cada 3 segundos mientras Estado está abierto (junto con `pollLog()` cada 1.5 s para el monitor). Al salir de Estado se detienen los sondeos rápidos.
 
 ---
 
