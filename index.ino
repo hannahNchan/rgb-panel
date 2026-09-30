@@ -159,7 +159,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>Matrix Studio 64</title>
-  <link rel="stylesheet" href="/tailwind.css?v=54">
+  <link rel="stylesheet" href="/tailwind.css?v=55">
 </head>
 <body>
   <div id="app"></div>
@@ -171,7 +171,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     </div>
   </div>
   <div id="toastHost" class="toast-host"></div>
-  <script src="/app.js?v=54"></script>
+  <script src="/app.js?v=55"></script>
 </body>
 </html>)HTML";
 
@@ -226,7 +226,7 @@ label.field>.input,label.field>.select,label.field>.textarea{margin-top:7px}
 .rich-editor:empty:before{content:attr(data-placeholder);color:#5f718c}
 .preview-panel{display:flex;flex-direction:column;gap:12px}
 .library-card{border:1px solid var(--border);border-radius:16px;background:#0b1527;padding:12px}.library-card:hover{border-color:#48648a;background:#0f1d34;transform:translateY(-2px)}.library-card.active{border-color:#ff6b35;box-shadow:0 0 0 2px rgba(255,107,53,.45)}
-.giphy-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px;max-height:340px;overflow:auto}.giphy-grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;border:2px solid transparent;background:#000;cursor:pointer}.giphy-grid img:hover{border-color:#48648a}.giphy-grid img.active{border-color:#ff6b35}.giphy-attr{margin-left:auto;font-size:11px;font-weight:800;letter-spacing:.06em;color:#9aa9bf}
+.giphy-scroll{position:relative;max-height:360px;overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border);border-radius:12px;padding:8px;background:#070d18}.giphy-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}.giphy-grid .muted{grid-column:1/-1;padding:8px}.giphy-more{display:flex;justify-content:center;padding-top:10px}.giphy-more .btn:empty,.giphy-more .hidden{display:none}.giphy-grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;border:2px solid transparent;background:#000;cursor:pointer}.giphy-grid img:hover{border-color:#48648a}.giphy-grid img.active{border-color:#ff6b35}.giphy-attr{margin-left:auto;font-size:11px;font-weight:800;letter-spacing:.06em;color:#9aa9bf}
 .library-preview{width:100%;aspect-ratio:1;background:#000;border-radius:10px;image-rendering:pixelated}
 .table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:9px;border-bottom:1px solid #21324e;font-size:12px}.table th{color:#9eacc2}
 dialog{border:1px solid var(--border);border-radius:18px;background:#0d1729;color:#fff;width:min(620px,calc(100% - 28px));padding:0;box-shadow:0 35px 120px rgba(0,0,0,.7)}dialog::backdrop{background:rgba(0,0,0,.68);backdrop-filter:blur(5px)}.dialog-head,.dialog-body,.dialog-foot{padding:16px 18px}.dialog-head{border-bottom:1px solid var(--border);font-weight:850;font-size:18px}.dialog-foot{border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
@@ -304,7 +304,7 @@ host.innerHTML=`
 
    <section class="page" id="page-text">
     <div class="page-head"><div><h2>Texto / Marquesina</h2><p>Multilínea, wrap automático y estilos por selección.</p></div></div>
-    <div class="grid-2"><div class="card"><div class="card-title">Editor enriquecido</div><div id="richEditor" class="rich-editor" contenteditable="true" data-placeholder="Escribe aquí varias líneas…">HOLA<br>MUNDO</div><div class="mt-3 row-wrap"><span class="selection-badge" id="selectionInfo">Sin selección</span></div><div class="split mt-3"><div><label class="field">Color de selección</label><div class="color-control mt-2"><input id="txtColor" type="color" value="#00ffff"><input class="input" id="txtHex" value="#00ffff"></div></div><label class="field">Tamaño<select class="select" id="txtSize"><option>8</option><option selected>10</option><option>12</option><option>14</option><option>16</option><option>20</option></select></label></div><label class="field mt-3">Fuente<select class="select" id="txtFont"><option value="monospace">Monospace</option><option value="Arial">Arial</option><option value="sans-serif">Sans</option><option value="serif">Serif</option></select></label><div class="toolbar mt-4"><button class="btn btn-primary" id="applySelectionStyle">Aplicar a selección</button><button class="btn" id="clearTextStyles">Quitar estilos</button><button class="btn" id="renderText">Actualizar preview</button></div><div class="note mt-4">Selecciona exactamente una letra, palabra o frase dentro del editor y luego aplica color, tamaño o fuente. El estilo sólo afecta ese rango.</div><div class="toolbar mt-4"><button class="btn btn-primary" id="sendText">Enviar al panel</button></div></div><div class="card preview-panel"><div class="card-title">Preview 64×64</div><div class="canvas-wrap"><canvas id="textCanvas" width="64" height="64"></canvas></div></div></div>
+    <div class="grid-2"><div class="card"><div class="card-title">Editor enriquecido</div><div id="richEditor" class="rich-editor" contenteditable="true" data-placeholder="Escribe aquí varias líneas…">HOLA<br>MUNDO</div><div class="mt-3 row-wrap"><span class="selection-badge" id="selectionInfo">Sin selección</span></div><div class="split mt-3"><div><label class="field">Color de selección</label><div class="color-control mt-2"><input id="txtColor" type="color" value="#00ffff"><input class="input" id="txtHex" value="#00ffff"></div></div><label class="field">Tamaño<select class="select" id="txtSize"><option>8</option><option selected>10</option><option>12</option><option>14</option><option>16</option><option>20</option></select></label></div><label class="field mt-3">Fuente<select class="select" id="txtFont"><option value="monospace">Monospace</option><option value="Arial">Arial</option><option value="sans-serif">Sans</option><option value="serif">Serif</option></select></label><div class="switch-row mt-2"><div><div class="font-semibold text-sm">Texto nítido (sin suavizado)</div><div class="text-xs muted">Píxeles sólidos, sin bordes grises. Recomendado para el panel RGB.</div></div><label class="switch"><input id="txtCrisp" type="checkbox" checked><span class="switch-track"></span></label></div><div class="toolbar mt-4"><button class="btn btn-primary" id="applySelectionStyle">Aplicar a selección</button><button class="btn" id="clearTextStyles">Quitar estilos</button><button class="btn" id="renderText">Actualizar preview</button></div><div class="note mt-4">Selecciona exactamente una letra, palabra o frase dentro del editor y luego aplica color, tamaño o fuente. El estilo sólo afecta ese rango.</div><div class="toolbar mt-4"><button class="btn btn-primary" id="sendText">Enviar al panel</button></div></div><div class="card preview-panel"><div class="card-title">Preview 64×64</div><div class="canvas-wrap"><canvas id="textCanvas" width="64" height="64"></canvas></div></div></div>
    </section>
 
    <section class="page" id="page-clock">
@@ -361,8 +361,8 @@ host.innerHTML=`
       </div>
       <div class="mt-3 hidden" id="gifTabGiphy">
        <div class="row-wrap"><input class="input" style="flex:1;min-width:0" id="giphyQuery" placeholder="Buscar GIFs…"><button class="btn btn-primary" id="giphySearch">Buscar</button></div>
-       <div class="giphy-grid mt-3" id="giphyGrid"></div>
-       <div class="row-wrap mt-3"><button class="btn hidden" id="giphyMore">Cargar más</button><span class="giphy-attr">Powered by GIPHY</span></div>
+       <div class="giphy-scroll mt-3" id="giphyScroll"><div class="giphy-grid" id="giphyGrid"></div><div class="giphy-more"><button class="btn hidden" id="giphyMore">Cargar más</button></div></div>
+       <div class="row-wrap mt-2"><span class="giphy-attr">Powered by GIPHY</span></div>
       </div>
       <div class="split mt-3">
        <label class="field">Ajuste 64×64<select class="select" id="gifFit"><option value="contain">Contener (completo)</option><option value="cover">Recortar (llenar)</option><option value="stretch">Estirar</option></select></label>
@@ -418,8 +418,27 @@ function selectionInsideEditor(){const s=window.getSelection();if(!s||!s.rangeCo
 document.addEventListener('selectionchange',()=>{if(selectionInsideEditor()){const s=window.getSelection(),r=s.getRangeAt(0);savedRange=r.cloneRange();const t=s.toString();$('#selectionInfo').textContent=t?`Selección: ${t.length} caracteres`:'Cursor sin selección'}});$('#txtColor').oninput=e=>$('#txtHex').value=e.target.value;$('#txtHex').onchange=e=>{if(/^#[0-9a-f]{6}$/i.test(e.target.value))$('#txtColor').value=e.target.value};
 function applySelectionStyle(){if(!savedRange||savedRange.collapsed||!editor.contains(savedRange.commonAncestorContainer)){toast('Selecciona una letra, palabra o frase','err');return}const span=document.createElement('span');span.style.color=$('#txtColor').value;span.style.fontSize=$('#txtSize').value+'px';span.style.fontFamily=$('#txtFont').value;try{span.appendChild(savedRange.extractContents());savedRange.insertNode(span);savedRange.selectNodeContents(span);const s=window.getSelection();s.removeAllRanges();s.addRange(savedRange);savedRange=savedRange.cloneRange();renderRichText();toast('Estilo aplicado sólo a la selección')}catch(e){toast('No se pudo aplicar el estilo: '+e.message,'err')}}
 $('#applySelectionStyle').onclick=applySelectionStyle;$('#clearTextStyles').onclick=()=>{const txt=editor.innerText;editor.innerHTML='';txt.split('\n').forEach((line,i)=>{if(i)editor.appendChild(document.createElement('br'));editor.appendChild(document.createTextNode(line))});renderRichText()};
-function collectRuns(node,style={color:'#ffffff',size:10,font:'monospace'},out=[]){if(node.nodeType===Node.TEXT_NODE){if(node.nodeValue)out.push({text:node.nodeValue,style:{...style}});return out}if(node.nodeType!==Node.ELEMENT_NODE)return out;if(node.tagName==='BR'){out.push({text:'\n',style:{...style}});return out}const cs=getComputedStyle(node),next={...style,color:cs.color||style.color,size:parseFloat(cs.fontSize)||style.size,font:cs.fontFamily||style.font};const block=['DIV','P'].includes(node.tagName);if(block&&out.length&&out[out.length-1].text!=='\n')out.push({text:'\n',style:{...next}});[...node.childNodes].forEach(ch=>collectRuns(ch,next,out));if(block&&out.length&&out[out.length-1].text!=='\n')out.push({text:'\n',style:{...next}});return out}
-function renderRichText(){black(tx);const runs=collectRuns(editor);let x=1,y=9,lineH=10;for(const run of runs){for(const ch of run.text){if(ch==='\n'){x=1;y+=lineH;lineH=10;if(y>63)return;continue}tx.font=`${run.style.size}px ${run.style.font}`;const w=Math.max(1,Math.ceil(tx.measureText(ch).width));lineH=Math.max(lineH,run.style.size+2);if(x+w>63){x=1;y+=lineH;lineH=run.style.size+2;if(y>63)return}tx.fillStyle=run.style.color;tx.textBaseline='alphabetic';tx.fillText(ch,x,y);x+=w}}}
+function collectRuns(node,style={color:'#ffffff',size:10,font:'monospace'},out=[]){if(node.nodeType===Node.TEXT_NODE){if(node.nodeValue)out.push({text:node.nodeValue,style:{...style}});return out}if(node.nodeType!==Node.ELEMENT_NODE)return out;if(node.tagName==='BR'){out.push({text:'\n',style:{...style}});return out}const cs=getComputedStyle(node),next={...style,color:node.style.color||style.color,size:parseFloat(cs.fontSize)||style.size,font:cs.fontFamily||style.font};const block=['DIV','P'].includes(node.tagName);if(block&&out.length&&out[out.length-1].text!=='\n')out.push({text:'\n',style:{...next}});[...node.childNodes].forEach(ch=>collectRuns(ch,next,out));if(block&&out.length&&out[out.length-1].text!=='\n')out.push({text:'\n',style:{...next}});return out}
+// Crisp mode draws each glyph as a white mask, thresholds its alpha and paints
+// the lit pixels with the exact run color: every pixel is fully on or off, with
+// no gray antialiasing fringe. Normal mode keeps the browser's smooth text.
+function textRGB(c,mc){mc.fillStyle='#000';mc.fillStyle=c;const h=mc.fillStyle;if(h[0]==='#')return[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];const t=(h.match(/[\d.]+/g)||[255,255,255]).map(Number);return[t[0],t[1],t[2]]}
+function renderRichText(){
+  const crisp=$('#txtCrisp').checked,off=document.createElement('canvas');off.width=64;off.height=64;
+  const o=off.getContext('2d',{willReadFrequently:true}),out=crisp?o.createImageData(64,64):null;
+  const mk=crisp?document.createElement('canvas'):null;if(mk){mk.width=64;mk.height=64}
+  const mc=mk?mk.getContext('2d',{willReadFrequently:true}):null;
+  const draw=(ch,x,y,st)=>{
+    if(!crisp){o.fillStyle=st.color;o.textBaseline='alphabetic';o.fillText(ch,x,y);return}
+    mc.clearRect(0,0,64,64);mc.font=o.font;mc.textBaseline='alphabetic';mc.fillStyle='#fff';mc.fillText(ch,x,y);
+    const [r,g,b]=textRGB(st.color,mc),d=mc.getImageData(0,0,64,64).data,od=out.data;
+    for(let i=3;i<d.length;i+=4)if(d[i]>=120){od[i-3]=r;od[i-2]=g;od[i-1]=b;od[i]=255}
+  };
+  (()=>{const runs=collectRuns(editor);let x=1,y=9,lineH=10;for(const run of runs){for(const ch of run.text){if(ch==='\n'){x=1;y+=lineH;lineH=10;if(y>63)return;continue}o.font=`${run.style.size}px ${run.style.font}`;const w=Math.max(1,Math.ceil(o.measureText(ch).width));lineH=Math.max(lineH,run.style.size+2);if(x+w>63){x=1;y+=lineH;lineH=run.style.size+2;if(y>63)return}draw(ch,x,y,run.style);x+=w}}})();
+  if(crisp)o.putImageData(out,0,0);
+  black(tx);tx.drawImage(off,0,0);
+}
+$('#txtCrisp').onchange=renderRichText;
 editor.addEventListener('input',renderRichText);$('#renderText').onclick=renderRichText;$('#sendText').onclick=()=>{renderRichText();sendCanvas(tc).catch(e=>toast(e.message,'err'))};renderRichText();
 
 // CLOCK UI
@@ -561,7 +580,7 @@ $('#gifFit').onchange=()=>{if(gifFile)gifRefresh(gifFile)};
 // Runs in the browser (the client has Internet); the ESP32 is not involved.
 // A picked GIF is downloaded as a Blob and goes through the same decode flow.
 const GIPHY_API_KEY='MnOOWuodMfdUZSUKd3fOiYJNakT0yHtp';
-let giphyOffset=0,giphyTotal=0,giphyLoaded=false;
+let giphyOffset=0,giphyTotal=0,giphyLoaded=false,giphyBusy=false;
 $$('.gif-tab').forEach(b=>b.onclick=()=>{
   $$('.gif-tab').forEach(x=>x.classList.toggle('btn-primary',x===b));
   $('#gifTabUpload').classList.toggle('hidden',b.dataset.tab!=='upload');
@@ -569,8 +588,10 @@ $$('.gif-tab').forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==='giphy'&&!giphyLoaded)giphyLoad(true);
 });
 async function giphyLoad(reset){
-  const q=$('#giphyQuery').value.trim(),grid=$('#giphyGrid');
-  if(reset){giphyOffset=0;grid.innerHTML='<div class="muted">Cargando…</div>'}
+  if(giphyBusy)return;giphyBusy=true;
+  const q=$('#giphyQuery').value.trim(),grid=$('#giphyGrid'),box=$('#giphyScroll'),more=$('#giphyMore');
+  if(reset){giphyOffset=0;grid.innerHTML='<div class="muted">Cargando…</div>';more.classList.add('hidden');box.scrollTop=0}
+  more.disabled=true;more.textContent='Cargando…';
   const url='https://api.giphy.com/v1/gifs/'+(q?'search':'trending')+'?api_key='+GIPHY_API_KEY+'&limit=24&offset='+giphyOffset+(q?'&lang=es&q='+encodeURIComponent(q):'');
   try{
     const r=await fetch(url),d=await r.json();
@@ -578,15 +599,18 @@ async function giphyLoad(reset){
     const items=d.data||[];
     if(reset)grid.innerHTML=items.length?'':'<div class="muted">Sin resultados.</div>';
     giphyLoaded=true;
+    let firstNew=null;
     for(const g of items){
       const im=g.images||{},prev=im.fixed_width_small||im.fixed_height_small||im.fixed_height;
       if(!prev)continue;
-      const el=document.createElement('img');el.loading='lazy';el.alt=g.title||'';el.src=prev.webp||prev.url;
-      el.onclick=()=>giphyPick(g,el);grid.appendChild(el);
+      const el=document.createElement('img');el.alt=g.title||'';el.src=prev.webp||prev.url;
+      el.onclick=()=>giphyPick(g,el);grid.appendChild(el);if(!firstNew)firstNew=el;
     }
     giphyOffset+=items.length;giphyTotal=(d.pagination&&d.pagination.total_count)||0;
-    $('#giphyMore').classList.toggle('hidden',!(items.length&&giphyOffset<giphyTotal&&giphyOffset<4999));
+    more.classList.toggle('hidden',!(items.length&&giphyOffset<giphyTotal&&giphyOffset<4999));
+    if(!reset&&firstNew)box.scrollTo({top:Math.max(0,firstNew.offsetTop-8),behavior:'smooth'});
   }catch(e){if(reset)grid.innerHTML='<div class="muted">No se pudo consultar Giphy.</div>';toast(e.message,'err')}
+  finally{giphyBusy=false;more.disabled=false;more.textContent='Cargar más'}
 }
 async function giphyPick(g,el){
   $$('#giphyGrid img').forEach(x=>x.classList.remove('active'));el.classList.add('active');
@@ -670,7 +694,7 @@ bool writeText(const char* path, const char* src){
   f.close(); return true;
 }
 
-const char* WEB_ASSET_VERSION = "5.4";
+const char* WEB_ASSET_VERSION = "5.5";
 
 void provisionWeb(){
   ensureDir(WWW_DIR);

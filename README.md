@@ -607,7 +607,7 @@ Esto permite que, una vez operativo el Admin SD, los assets puedan modificarse s
 El firmware documentado contiene:
 
 ```cpp
-const char* WEB_ASSET_VERSION = "5.4";
+const char* WEB_ASSET_VERSION = "5.5";
 ```
 
 Aunque el archivo de firmware se llame `v5_3`, este valor **no es necesariamente la versión semántica completa del firmware**.
@@ -2619,6 +2619,14 @@ Antes de cada carácter:
 5. aplica color/fuente/tamaño.
 
 El texto deja de dibujarse cuando rebasa 64 píxeles verticales.
+
+### Texto nítido (sin suavizado)
+
+El switch **Texto nítido** (activado por defecto) evita los píxeles grises del antialiasing, que en un panel RGB se ven como sombra alrededor de las letras.
+
+En ese modo cada carácter se dibuja como máscara blanca en un canvas auxiliar, se umbraliza el alfa (≥120 encendido, resto apagado) y los píxeles encendidos se pintan con el **color exacto** del segmento. El resultado tiene solo los colores elegidos, sin tonos intermedios. Con el switch apagado se usa el texto suavizado normal del navegador.
+
+El color por defecto de un texto sin estilo es `#ffffff`. `collectRuns()` toma el color del `style` inline de cada elemento (los `<span>` que crea **Aplicar a selección**) y no del color computado de la página.
 
 El ESP32 **no interpreta fuentes ni spans**: recibe el resultado final rasterizado RGB565.
 
