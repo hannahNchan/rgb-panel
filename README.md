@@ -525,6 +525,10 @@ El firmware crea esta estructura:
     ├── animations/
     │   └── *.pma
     │
+    ├── gifs/
+    │   ├── *.gif   (original, para preview)
+    │   └── *.pma   (PMA2 convertido, para el panel)
+    │
     └── remote/
         ├── *.jpg
         ├── *.png
@@ -542,6 +546,15 @@ Contiene frames estáticos ya convertidos a RGB565.
 ### `/gallery/animations`
 
 Contiene animaciones en el formato binario propio PMA.
+
+### `/gallery/gifs`
+
+Contiene los GIFs subidos desde la sección **GIF's** de la interfaz. Por cada GIF se guardan dos archivos con el mismo nombre base:
+
+- `<nombre>.gif`: el GIF original, servido en `/gifs?name=<nombre>.gif` para el preview animado del historial.
+- `<nombre>.pma`: la conversión a 64×64 en formato `PMA2` (delay por frame) que reproduce el panel.
+
+El GIF se decodifica y convierte **en el navegador** (`ImageDecoder`); el ESP32 nunca decodifica GIFs.
 
 ### `/gallery/remote`
 
@@ -594,7 +607,7 @@ Esto permite que, una vez operativo el Admin SD, los assets puedan modificarse s
 El firmware documentado contiene:
 
 ```cpp
-const char* WEB_ASSET_VERSION = "5.2";
+const char* WEB_ASSET_VERSION = "5.3";
 ```
 
 Aunque el archivo de firmware se llame `v5_3`, este valor **no es necesariamente la versión semántica completa del firmware**.
@@ -1256,7 +1269,9 @@ Al llegar al último frame vuelve a cero.
 
 # 20. Formato de animación PMA
 
-El formato utilizado por el backend es:
+Existen dos variantes. El firmware detecta cuál usar por el _magic_ de la cabecera y ambas se reproducen con `playAnim()` / `serviceAnim()`.
+
+## 20.1 PMA1 (delay global, legado)
 
 ```text
 Offset  Tamaño    Contenido
@@ -1264,23 +1279,60 @@ Offset  Tamaño    Contenido
 4       2 bytes   width, little-endian
 6       2 bytes   height
 8       2 bytes   frame count
-10      2 bytes   delay por frame en ms
-12      ...       frames RGB565 consecutivos
-```
-
-Cada frame:
-
-```text
-8192 bytes
+10      2 bytes   delay por frame en ms (uno solo, global)
+12      ...       frames RGB565 consecutivos (8192 bytes cada uno)
 ```
 
 Una animación de 100 frames ocupa aproximadamente:
 
 ```text
-12 + 100 × 8192
-= 819212 bytes
-≈ 800 KB
+12 + 100 × 8192 ≈ 800 KB
 ```
+
+## 20.2 PMA2 (delay por frame)
+
+Usado por la sección **GIF's**. Conserva el timing individual de cada frame del GIF original.
+
+```text
+Cabecera (10 bytes):
+0       4 bytes   "PMA2"
+4       2 bytes   width, little-endian (64)
+6       2 bytes   height (64)
+8       2 bytes   frame count
+
+Por cada frame (8194 bytes):
++0      2 bytes   delay de ESE frame en ms, little-endian
++2      8192 bytes frame RGB565
+```
+
+Todos los campos `u16` son little-endian, igual que PMA1. Los frames RGB565 usan byte alto primero por píxel, consistente con el helper `to565()` de la web y con `applyFrame()`.
+
+Compatibilidad: las animaciones `PMA1` existentes siguen funcionando sin cambios; `playAnim()` distingue el formato por el _magic_.
+
+## 20.3 Sección GIF's (interfaz y endpoints)
+
+Flujo de uso:
+
+1. El usuario elige un GIF y un modo de ajuste a 64×64: **Contener** (mantiene proporción con bordes negros), **Recortar** (llena y recorta) o **Estirar**.
+2. El navegador decodifica el GIF con `ImageDecoder`, ajusta cada frame a un canvas 64×64, lo convierte a RGB565 y arma un blob `PMA2`. Se muestra un preview animado, **sin enviar nada al panel**.
+3. Al **Agregar al historial** se suben dos archivos a `/gallery/gifs/` vía `/api/fs/upload`: el `.gif` original y el `.pma`. Sigue sin reproducirse en el panel.
+4. El historial se muestra en un grid responsivo con el preview animado de cada GIF.
+5. Al seleccionar una tarjeta se activan **Cargar GIF al panel** y **Borrar GIF**.
+
+Endpoints añadidos (no alteran el resto de la API ni el OTA):
+
+```text
+GET    /api/gifs                 Lista los GIFs ({name, size} por cada <base>.gif)
+GET    /gifs?name=<base>.gif     Sirve el GIF original (image/gif) para el preview
+POST   /api/gifs/play?name=<base> Reproduce /gallery/gifs/<base>.pma en el panel
+DELETE /api/gifs/delete?name=<base> Borra <base>.gif y <base>.pma de la microSD
+```
+
+La subida reutiliza `/api/fs/upload?path=/gallery/gifs/<base>.<ext>` (handler `genericUpload`).
+
+Límite: se procesan hasta `GIF_MAX_FRAMES` (300) frames por GIF para acotar memoria y espacio en la SD.
+
+Requisito de navegador: la decodificación usa `ImageDecoder` (WebCodecs). Navegadores sin soporte muestran un aviso y no pueden convertir GIFs animados.
 
 ---
 

@@ -95,6 +95,7 @@ uint8_t frameBuffer[FRAME_BYTES];
 const char* WWW_DIR = "/www";
 const char* IMAGE_DIR = "/gallery/images";
 const char* ANIM_DIR = "/gallery/animations";
+const char* GIF_DIR = "/gallery/gifs";
 const char* REMOTE_DIR = "/gallery/remote";
 
 File uploadFile;
@@ -110,6 +111,7 @@ bool animationPlaying = false;
 uint16_t animFrames = 0;
 uint16_t animIndex = 0;
 uint16_t animDelay = 100;
+bool animPmaV2 = false;
 uint32_t nextAnimAt = 0;
 
 // OTA
@@ -157,7 +159,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>Matrix Studio 64</title>
-  <link rel="stylesheet" href="/tailwind.css?v=50">
+  <link rel="stylesheet" href="/tailwind.css?v=53">
 </head>
 <body>
   <div id="app"></div>
@@ -169,7 +171,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     </div>
   </div>
   <div id="toastHost" class="toast-host"></div>
-  <script src="/app.js?v=50"></script>
+  <script src="/app.js?v=53"></script>
 </body>
 </html>)HTML";
 
@@ -223,7 +225,7 @@ label.field>.input,label.field>.select,label.field>.textarea{margin-top:7px}
 .rich-editor{min-height:180px;max-height:330px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#050a14;border:1px solid #2d4162;border-radius:14px;padding:14px;line-height:1.45;outline:none;font-family:monospace}
 .rich-editor:empty:before{content:attr(data-placeholder);color:#5f718c}
 .preview-panel{display:flex;flex-direction:column;gap:12px}
-.library-card{border:1px solid var(--border);border-radius:16px;background:#0b1527;padding:12px}.library-card:hover{border-color:#48648a;background:#0f1d34;transform:translateY(-2px)}
+.library-card{border:1px solid var(--border);border-radius:16px;background:#0b1527;padding:12px}.library-card:hover{border-color:#48648a;background:#0f1d34;transform:translateY(-2px)}.library-card.active{border-color:#ff6b35;box-shadow:0 0 0 2px rgba(255,107,53,.45)}
 .library-preview{width:100%;aspect-ratio:1;background:#000;border-radius:10px;image-rendering:pixelated}
 .table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:9px;border-bottom:1px solid #21324e;font-size:12px}.table th{color:#9eacc2}
 dialog{border:1px solid var(--border);border-radius:18px;background:#0d1729;color:#fff;width:min(620px,calc(100% - 28px));padding:0;box-shadow:0 35px 120px rgba(0,0,0,.7)}dialog::backdrop{background:rgba(0,0,0,.68);backdrop-filter:blur(5px)}.dialog-head,.dialog-body,.dialog-foot{padding:16px 18px}.dialog-head{border-bottom:1px solid var(--border);font-weight:850;font-size:18px}.dialog-foot{border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
@@ -266,6 +268,7 @@ host.innerHTML=`
    <button class="nav-btn" data-page="clock">Modo reloj</button>
    <button class="nav-btn" data-page="library">Biblioteca</button>
    <button class="nav-btn" data-page="gallery">Galería</button>
+   <button class="nav-btn" data-page="gifs">GIF's</button>
    <button class="nav-btn" data-page="admin">Admin SD</button>
    <button class="nav-btn" data-page="firmware">Firmware</button>
    <button class="nav-btn" data-page="panel">Panel</button>
@@ -345,6 +348,28 @@ host.innerHTML=`
 
    <section class="page" id="page-library"><div class="page-head"><div><h2>Biblioteca Pixel Art</h2><p>Contenido local + importación experimental desde enlaces públicos de Pixilart.</p></div></div><div class="card"><div class="card-title">Colección local</div><div id="builtInLibrary" class="grid-cards"></div></div><div class="card"><div class="card-title">Pixilart</div><div class="note">Pixilart no publica una API oficial/documentada para consultar su galería. Matrix Studio usa únicamente páginas públicas y el metadato og:image. Respeta los derechos/licencia del autor.</div><div class="row-wrap mt-4"><a class="btn" target="_blank" rel="noopener" href="https://www.pixilart.com/gallery/tags/64x64">Abrir Pixilart #64x64</a></div><label class="field mt-4">URL pública de una obra<input class="input" id="pixilartUrl" placeholder="https://www.pixilart.com/art/..."></label><button class="btn btn-primary mt-3" id="importPixilart">Importar obra</button></div></section>
    <section class="page" id="page-gallery"><div class="page-head"><div><h2>Galería</h2><p>Contenido persistente guardado en la microSD.</p></div><button class="btn" id="reloadGallery">Actualizar</button></div><div class="grid-cards" id="galleryList"></div></section>
+   <section class="page" id="page-gifs">
+    <div class="page-head"><div><h2>GIF's</h2><p>Sube GIFs animados: el navegador los convierte a 64×64 y se guardan en la microSD.</p></div><button class="btn" id="gifReload">Actualizar</button></div>
+    <div class="grid-2">
+     <div class="card">
+      <div class="card-title">Nuevo GIF</div>
+      <label class="file-picker" for="gifFile"><span class="file-button">Elegir GIF</span><span class="file-name" id="gifFileName">Ningún archivo</span></label>
+      <input class="file-native" id="gifFile" type="file" accept="image/gif">
+      <div class="split mt-3">
+       <label class="field">Ajuste 64×64<select class="select" id="gifFit"><option value="contain">Contener (completo)</option><option value="cover">Recortar (llenar)</option><option value="stretch">Estirar</option></select></label>
+       <label class="field">Nombre<input class="input" id="gifName" placeholder="mi-gif"></label>
+      </div>
+      <div class="note mt-3" id="gifInfo">Elige un GIF para previsualizarlo. No se envía al panel hasta que lo agregues y lo cargues.</div>
+      <div class="row-wrap mt-4"><button class="btn btn-primary" id="gifAdd" disabled>Agregar al historial</button></div>
+     </div>
+     <div class="card"><div class="card-title">Vista previa 64×64</div><div class="canvas-wrap"><canvas id="gifCanvas" width="64" height="64"></canvas></div></div>
+    </div>
+    <div class="card mt-3">
+     <div class="card-title">Historial en la microSD</div>
+     <div class="grid-cards" id="gifGrid"></div>
+     <div class="toolbar mt-4"><button class="btn btn-primary" id="gifLoad" disabled>Cargar GIF al panel</button><button class="btn btn-danger" id="gifDelete" disabled>Borrar GIF</button></div>
+    </div>
+   </section>
    <section class="page" id="page-admin"><div class="page-head"><div><h2>Admin SD</h2><p>Gestiona archivos sin desmontar el display.</p></div></div><div class="card"><div class="row-wrap"><input class="input" style="max-width:420px" id="adminPath" value="/www"><button class="btn" id="listFiles">Listar</button><button class="btn" id="mkdir">Crear carpeta</button></div><label class="file-picker mt-3" for="adminUpload"><span class="file-button">Elegir archivos</span><span class="file-name" id="adminFileName">Ningún archivo</span></label><input class="file-native" id="adminUpload" type="file" multiple><button class="btn btn-green mt-3" id="uploadFiles">Subir a carpeta actual</button><div class="mt-4" id="fileList"></div></div></section>
    <section class="page" id="page-firmware"><div class="page-head"><div><h2>Firmware OTA</h2><p>Actualiza el ESP32 desde el navegador.</p></div></div><div class="card"><label class="file-picker" for="fwFile"><span class="file-button">Elegir .bin</span><span class="file-name" id="fwFileName">Ningún firmware</span></label><input class="file-native" id="fwFile" type="file" accept=".bin,application/octet-stream"><button class="btn btn-primary mt-4" id="fwUpload">Instalar firmware</button></div></section>
    <section class="page" id="page-panel"><div class="page-head"><div><h2>Panel</h2><p>Estado y ajustes del sistema.</p></div></div><div class="card"><div class="stats" id="stats"></div><label class="field mt-4">Brillo<div class="quick-range mt-2"><input id="brightness" type="range" min="1" max="255" value="80"><span id="brightnessValue">80</span></div></label></div></section>
@@ -352,7 +377,7 @@ host.innerHTML=`
  </div>
 </div>`;
 
-$$('.nav-btn').forEach(b=>b.onclick=()=>{$$('.nav-btn').forEach(x=>x.classList.remove('active'));$$('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#page-'+b.dataset.page).classList.add('active');if(b.dataset.page==='gallery')loadGallery();if(b.dataset.page==='admin')listFiles();if(b.dataset.page==='panel')loadStatus();if(b.dataset.page==='clock'){loadClockStatus();renderClockPreview()}});
+$$('.nav-btn').forEach(b=>b.onclick=()=>{$$('.nav-btn').forEach(x=>x.classList.remove('active'));$$('.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#page-'+b.dataset.page).classList.add('active');if(b.dataset.page==='gallery')loadGallery();if(b.dataset.page==='gifs')loadGifs();if(b.dataset.page==='admin')listFiles();if(b.dataset.page==='panel')loadStatus();if(b.dataset.page==='clock'){loadClockStatus();renderClockPreview()}});
 
 function black(ctx){ctx.fillStyle='#000';ctx.fillRect(0,0,64,64)}
 function to565(canvas){const d=canvas.getContext('2d',{willReadFrequently:true}).getImageData(0,0,64,64).data,o=new Uint8Array(8192);for(let p=0;p<4096;p++){let i=p*4,v=((d[i]&248)<<8)|((d[i+1]&252)<<3)|(d[i+2]>>3);o[p*2]=(v>>8)&255;o[p*2+1]=v&255}return o}
@@ -410,6 +435,95 @@ async function loadGallery(){const box=$('#galleryList');box.innerHTML='<div cla
 $('#adminUpload').onchange=e=>$('#adminFileName').textContent=[...e.target.files].map(f=>f.name).join(', ')||'Ningún archivo';async function listFiles(){const path=$('#adminPath').value||'/';const r=await fetch('/api/fs/list?path='+encodeURIComponent(path));const d=await r.json();let h='<table class="table"><tr><th>Nombre</th><th>Tipo</th><th>Tamaño</th><th></th></tr>';for(const it of d.items)h+=`<tr><td>${it.name}</td><td>${it.dir?'carpeta':'archivo'}</td><td>${it.dir?'':it.size}</td><td><button class="btn btn-danger fdel" data-path="${it.path}">Eliminar</button></td></tr>`;h+='</table>';$('#fileList').innerHTML=h;$$('.fdel').forEach(b=>b.onclick=async()=>{const v=await modal('Eliminar',`¿Eliminar <b>${b.dataset.path}</b>?`,'Eliminar');if(v!==null){await fetch('/api/fs/delete?path='+encodeURIComponent(b.dataset.path),{method:'DELETE'});listFiles()}})}$('#listFiles').onclick=listFiles;$('#mkdir').onclick=async()=>{const v=await modal('Crear carpeta','<label class="field">Nombre<input class="input" name="name"></label>','Crear');if(!v)return;const base=$('#adminPath').value.replace(/\/$/,'');await fetch('/api/fs/mkdir?path='+encodeURIComponent(base+'/'+v.name),{method:'POST'});listFiles()};$('#uploadFiles').onclick=async()=>{const files=[...$('#adminUpload').files];if(!files.length)return toast('Selecciona archivos','err');const base=$('#adminPath').value.replace(/\/$/,'');showLoader('Subiendo archivos','Preparando…',5);try{let i=0;for(const f of files){i++;await uploadXHR('/api/fs/upload?path='+encodeURIComponent(base+'/'+f.name),'file',f,f.name,`Subiendo ${i}/${files.length}`)}hideLoader();toast('Archivos subidos');listFiles()}catch(e){hideLoader();toast(e.message,'err')}};
 $('#fwFile').onchange=e=>$('#fwFileName').textContent=e.target.files[0]?.name||'Ningún firmware';$('#fwUpload').onclick=async()=>{const f=$('#fwFile').files[0];if(!f)return toast('Selecciona un .bin','err');const v=await modal('Actualizar firmware',`Se instalará <b>${f.name}</b> y el ESP32 reiniciará. No desconectes alimentación.`,'Instalar');if(v===null)return;try{await uploadXHR('/api/firmware','firmware',f,f.name,'Actualizando firmware');toast('Firmware instalado; reiniciando…');setTimeout(()=>location.href='http://matrix.local',9000)}catch(e){toast(e.message,'err')}};
 async function loadStatus(){try{const s=await (await fetch('/api/status')).json();$('#connectionText').textContent=`${s.ip} · ${s.rssi??'?'} dBm`;$('#stats').innerHTML=`<div class="stat"><div class="v">${s.ip}</div><div class="k">IP</div></div><div class="stat"><div class="v">${s.rssi??'?'} dBm</div><div class="k">Wi-Fi</div></div><div class="stat"><div class="v">${s.sdUsedMB??'?'} / ${s.sdTotalMB??'?'} MB</div><div class="k">microSD</div></div><div class="stat"><div class="v">${s.lastRenderMs??'?'} ms</div><div class="k">Último render</div></div>`}catch{$('#connectionText').textContent='sin conexión'}}loadStatus();setInterval(loadStatus,10000);loadClockStatus();
+
+// ---- GIF's ----
+// GIFs are decoded in the browser (ImageDecoder), each frame is fitted to 64x64
+// and packed into PMA2 (per-frame delay). The panel never decodes GIFs itself.
+const GIF_MAX_FRAMES=300;
+let gifFrames=null,gifFile=null,gifSelected=null,gifTimer=null;
+const gifCtx=$('#gifCanvas').getContext('2d',{willReadFrequently:true});
+
+function gifFitRect(sw,sh,mode){
+  if(mode==='stretch')return{dx:0,dy:0,dw:64,dh:64};
+  const s=mode==='cover'?Math.max(64/sw,64/sh):Math.min(64/sw,64/sh);
+  const dw=Math.max(1,Math.round(sw*s)),dh=Math.max(1,Math.round(sh*s));
+  return{dx:Math.round((64-dw)/2),dy:Math.round((64-dh)/2),dw,dh};
+}
+async function gifDecode(file,mode){
+  if(typeof ImageDecoder==='undefined')throw new Error('Este navegador no soporta ImageDecoder. Usa Chrome o un Safari reciente.');
+  const dec=new ImageDecoder({data:await file.arrayBuffer(),type:'image/gif'});
+  if(dec.completed)await dec.completed;
+  await dec.tracks.ready;
+  const track=dec.tracks.selectedTrack;
+  const count=Math.min(track?track.frameCount||1:1,GIF_MAX_FRAMES);
+  const tmp=document.createElement('canvas');tmp.width=64;tmp.height=64;
+  const t=tmp.getContext('2d',{willReadFrequently:true});
+  const frames=[];
+  for(let i=0;i<count;i++){
+    const {image}=await dec.decode({frameIndex:i});
+    t.fillStyle='#000';t.fillRect(0,0,64,64);
+    const r=gifFitRect(image.displayWidth||image.codedWidth,image.displayHeight||image.codedHeight,mode);
+    t.drawImage(image,r.dx,r.dy,r.dw,r.dh);
+    let delay=Math.round((image.duration||0)/1000);
+    if(!delay||delay<20)delay=100;if(delay>5000)delay=5000;
+    frames.push({data:to565(tmp),delay});
+    if(image.close)image.close();
+  }
+  if(dec.close)dec.close();
+  if(!frames.length)throw new Error('El GIF no tiene frames legibles');
+  return frames;
+}
+function gifBuildPma2(frames){
+  const per=2+8192,out=new Uint8Array(10+frames.length*per),dv=new DataView(out.buffer);
+  out[0]=80;out[1]=77;out[2]=65;out[3]=50; // "PMA2"
+  dv.setUint16(4,64,true);dv.setUint16(6,64,true);dv.setUint16(8,frames.length,true);
+  let off=10;for(const f of frames){dv.setUint16(off,f.delay,true);off+=2;out.set(f.data,off);off+=8192}
+  return out;
+}
+function gifPlayPreview(frames){
+  if(gifTimer)clearTimeout(gifTimer);let i=0;
+  const step=()=>{
+    const f=frames[i],im=gifCtx.createImageData(64,64);
+    for(let p=0;p<4096;p++){const v=(f.data[p*2]<<8)|f.data[p*2+1];im.data[p*4]=((v>>11)&31)<<3;im.data[p*4+1]=((v>>5)&63)<<2;im.data[p*4+2]=(v&31)<<3;im.data[p*4+3]=255}
+    gifCtx.putImageData(im,0,0);i=(i+1)%frames.length;gifTimer=setTimeout(step,f.delay);
+  };step();
+}
+async function gifRefresh(file){
+  gifFile=file;gifFrames=null;$('#gifAdd').disabled=true;$('#gifInfo').textContent='Decodificando…';
+  try{const frames=await gifDecode(file,$('#gifFit').value);gifFrames=frames;$('#gifInfo').textContent=`${frames.length} frames · listo para agregar`;$('#gifAdd').disabled=false;gifPlayPreview(frames)}
+  catch(e){$('#gifInfo').textContent=e.message;toast(e.message,'err')}
+}
+$('#gifFile').onchange=e=>{const f=e.target.files[0];if(!f)return;$('#gifFileName').textContent=f.name;if(!$('#gifName').value)$('#gifName').value=f.name.replace(/\.gif$/i,'');gifRefresh(f)};
+$('#gifFit').onchange=()=>{if(gifFile)gifRefresh(gifFile)};
+$('#gifAdd').onclick=async()=>{
+  if(!gifFrames||!gifFile)return toast('Elige un GIF','err');
+  let base=($('#gifName').value||'gif').trim().replace(/[^a-zA-Z0-9_-]/g,'_')||'gif';
+  const pma=gifBuildPma2(gifFrames);
+  try{
+    await uploadXHR('/api/fs/upload?path='+encodeURIComponent('/gallery/gifs/'+base+'.gif'),'file',gifFile,base+'.gif','Subiendo GIF original');
+    await uploadXHR('/api/fs/upload?path='+encodeURIComponent('/gallery/gifs/'+base+'.pma'),'file',new Blob([pma],{type:'application/octet-stream'}),base+'.pma','Guardando frames');
+    toast('GIF agregado al historial');loadGifs();
+  }catch(e){toast(e.message,'err')}
+};
+async function loadGifs(){
+  const box=$('#gifGrid');box.innerHTML='<div class="muted">Cargando…</div>';
+  gifSelected=null;$('#gifLoad').disabled=true;$('#gifDelete').disabled=true;
+  try{
+    const d=await (await fetch('/api/gifs')).json();box.innerHTML='';
+    if(!d.gifs||!d.gifs.length){box.innerHTML='<div class="muted">Sin GIFs todavía.</div>';return}
+    for(const g of d.gifs){
+      const card=document.createElement('div');card.className='library-card';
+      const img=document.createElement('img');img.className='library-preview';img.loading='lazy';img.src='/gifs?name='+encodeURIComponent(g.name+'.gif')+'&t='+Date.now();
+      card.appendChild(img);
+      card.insertAdjacentHTML('beforeend',`<div class="font-bold mt-2">${g.name}</div><div class="muted text-xs mt-1">${Math.round(g.size/1024)} KB</div>`);
+      card.onclick=()=>{$$('#gifGrid .library-card').forEach(c=>c.classList.remove('active'));card.classList.add('active');gifSelected=g.name;$('#gifLoad').disabled=false;$('#gifDelete').disabled=false};
+      box.appendChild(card);
+    }
+  }catch(e){box.innerHTML='<div class="muted">No se pudo cargar el historial.</div>'}
+}
+$('#gifReload').onclick=loadGifs;
+$('#gifLoad').onclick=async()=>{if(!gifSelected)return;try{const r=await fetch('/api/gifs/play?name='+encodeURIComponent(gifSelected),{method:'POST'});if(!r.ok)throw Error('No se pudo cargar');toast('GIF cargado al panel')}catch(e){toast(e.message,'err')}};
+$('#gifDelete').onclick=async()=>{if(!gifSelected)return;const v=await modal('Borrar GIF',`¿Eliminar <b>${gifSelected}</b> de la microSD?`,'Borrar');if(v!==null){await fetch('/api/gifs/delete?name='+encodeURIComponent(gifSelected),{method:'DELETE'});loadGifs()}};
 )JS";
 
 // =========================
@@ -447,13 +561,14 @@ bool writeText(const char* path, const char* src){
   f.close(); return true;
 }
 
-const char* WEB_ASSET_VERSION = "5.2";
+const char* WEB_ASSET_VERSION = "5.3";
 
 void provisionWeb(){
   ensureDir(WWW_DIR);
   ensureDir("/gallery");
   ensureDir(IMAGE_DIR);
   ensureDir(ANIM_DIR);
+  ensureDir(GIF_DIR);
   ensureDir(REMOTE_DIR);
 
   String installedVersion = "";
@@ -532,17 +647,33 @@ void applyFrame(){
 }
 
 uint16_t read16(File& f){int a=f.read(),b=f.read();return (a<0||b<0)?0:(uint16_t)a|((uint16_t)b<<8);}
+// Animation playback supports two on-disk formats:
+//   PMA1: "PMA1" + w + h + frames + delay        (single global delay, legacy)
+//   PMA2: "PMA2" + w + h + frames, then per frame: delay + FRAME_BYTES
+// PMA2 keeps each GIF frame's own timing. All fields are little-endian u16.
 bool playAnim(const String& p){
   stopClock(); stopAnim(); animFile=SD_MMC.open(p,FILE_READ); if(!animFile)return false;
-  char m[4]; if(animFile.read((uint8_t*)m,4)!=4||memcmp(m,"PMA1",4)){animFile.close();return false;}
-  uint16_t w=read16(animFile),h=read16(animFile);animFrames=read16(animFile);animDelay=read16(animFile);
+  char m[4]; if(animFile.read((uint8_t*)m,4)!=4){animFile.close();return false;}
+  if(!memcmp(m,"PMA2",4))animPmaV2=true;
+  else if(!memcmp(m,"PMA1",4))animPmaV2=false;
+  else{animFile.close();return false;}
+  uint16_t w=read16(animFile),h=read16(animFile);animFrames=read16(animFile);
+  animDelay=animPmaV2?100:read16(animFile);
   if(w!=64||h!=64||!animFrames){animFile.close();return false;}
   animIndex=0;animationPlaying=true;nextAnimAt=millis();return true;
 }
 void serviceAnim(){
   if(!animationPlaying||!animFile||millis()<nextAnimAt)return;
-  size_t off=12+(size_t)animIndex*FRAME_BYTES;
-  if(!animFile.seek(off)||animFile.read(frameBuffer,FRAME_BYTES)!=FRAME_BYTES){stopAnim();return;}
+  if(animPmaV2){
+    // Header is 10 bytes; each frame block is 2-byte delay + FRAME_BYTES pixels.
+    size_t off=10+(size_t)animIndex*(2+FRAME_BYTES);
+    if(!animFile.seek(off)){stopAnim();return;}
+    animDelay=read16(animFile);
+    if(animFile.read(frameBuffer,FRAME_BYTES)!=FRAME_BYTES){stopAnim();return;}
+  }else{
+    size_t off=12+(size_t)animIndex*FRAME_BYTES;
+    if(!animFile.seek(off)||animFile.read(frameBuffer,FRAME_BYTES)!=FRAME_BYTES){stopAnim();return;}
+  }
   applyFrame();animIndex=(animIndex+1)%animFrames;nextAnimAt=millis()+animDelay;
 }
 
@@ -848,6 +979,27 @@ String galleryJson(){
   while(f){if(!f.isDirectory()){if(!first)j+=",";first=false;String n=f.name();int s=n.lastIndexOf('/');if(s>=0)n=n.substring(s+1);j+="{\"name\":\""+n+"\",\"size\":"+String((uint32_t)f.size())+"}";}f.close();f=d.openNextFile();}d.close();j+="]}";return j;
 }
 
+// Lists stored GIFs from GIF_DIR. Each entry keeps a <base>.gif (preview) and
+// a <base>.pma (PMA2 played on the panel). Only the .gif files are reported.
+String gifsJson(){
+  String j="{\"gifs\":[";File d=SD_MMC.open(GIF_DIR);bool first=true;
+  if(d){File f=d.openNextFile();
+    while(f){
+      if(!f.isDirectory()){
+        String n=f.name();int s=n.lastIndexOf('/');if(s>=0)n=n.substring(s+1);
+        if(n.endsWith(".gif")){
+          if(!first)j+=",";first=false;
+          String base=n.substring(0,n.length()-4);
+          j+="{\"name\":\""+base+"\",\"size\":"+String((uint32_t)f.size())+"}";
+        }
+      }
+      f.close();f=d.openNextFile();
+    }
+    d.close();
+  }
+  j+="]}";return j;
+}
+
 void setupServer(){
   server.on("/",HTTP_GET,[]{
     server.sendHeader("Cache-Control","no-store, no-cache, must-revalidate, max-age=0");
@@ -947,6 +1099,24 @@ void setupServer(){
     String type=server.arg("type"),name=safeName(server.arg("name"));
     String p=(type=="image"?String(IMAGE_DIR):String(ANIM_DIR))+"/"+name;
     stopAnim(); if(!SD_MMC.remove(p))server.send(500,"text/plain","No se pudo eliminar");else server.send(200,"application/json","{\"ok\":true}");
+  });
+
+  server.on("/api/gifs",HTTP_GET,[]{server.send(200,"application/json",gifsJson());});
+  server.on("/gifs",HTTP_GET,[]{
+    String name=safeName(server.arg("name"));if(!name.endsWith(".gif"))name+=".gif";
+    String p=String(GIF_DIR)+"/"+name;
+    if(!SD_MMC.exists(p)){server.send(404,"text/plain","No encontrado");return;}
+    File f=SD_MMC.open(p,FILE_READ);server.streamFile(f,"image/gif");f.close();
+  });
+  server.on("/api/gifs/play",HTTP_POST,[]{
+    String p=String(GIF_DIR)+"/"+safeName(server.arg("name"))+".pma";
+    if(!playAnim(p))server.send(400,"text/plain","GIF invalido");else server.send(200,"application/json","{\"ok\":true}");
+  });
+  server.on("/api/gifs/delete",HTTP_DELETE,[]{
+    String base=safeName(server.arg("name"));stopAnim();
+    SD_MMC.remove(String(GIF_DIR)+"/"+base+".gif");
+    SD_MMC.remove(String(GIF_DIR)+"/"+base+".pma");
+    server.send(200,"application/json","{\"ok\":true}");
   });
 
   server.on("/api/fs/list",HTTP_GET,[]{server.send(200,"application/json",listJson(safePath(server.arg("path"))));});
